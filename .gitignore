@@ -1,0 +1,25 @@
+# Android Studio / IntelliJ
+*.iml
+.idea/
+.kotlin/
+
+# Gradle
+.gradle/
+**/build/
+
+# Configuración local del SDK
+local.properties
+
+# Android
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Claves de firma Android
+*.jks
+*.keystore
+keystore.properties
