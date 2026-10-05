@@ -248,7 +248,7 @@ def h5_array(path):
 
 
 def build_tf_model():
-    inp = tf.keras.Input(shape=(875, 1), dtype=tf.float32, name="input_4")
+    inp = tf.keras.Input(batch_shape=(1, 875, 1), dtype=tf.float32, name="input_4")
     x = tf.keras.layers.Conv1D(
         filters=32,
         kernel_size=5,
@@ -349,6 +349,7 @@ def convert_builtin_only(model):
     converter.optimizations = []
     converter.target_spec.supported_types = [tf.float32]
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+    converter.experimental_enable_resource_variables = True
 
     try:
         blob = converter.convert()
