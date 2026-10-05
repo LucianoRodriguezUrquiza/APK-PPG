@@ -1,0 +1,336 @@
+{
+  "canonical_h5_md5": "189bc9c1e6b946a0b91f936a07848801",
+  "tensorflow_version": "2.17.1",
+  "architecture": {
+    "keras_version": "2.4.0",
+    "backend": "tensorflow",
+    "layers": [
+      [
+        "InputLayer",
+        "input_4"
+      ],
+      [
+        "Conv1D",
+        "conv1d_48"
+      ],
+      [
+        "Bidirectional",
+        "bidirectional"
+      ],
+      [
+        "Bidirectional",
+        "bidirectional_1"
+      ],
+      [
+        "Bidirectional",
+        "bidirectional_2"
+      ],
+      [
+        "Dense",
+        "dense_5"
+      ],
+      [
+        "Dense",
+        "SBP"
+      ],
+      [
+        "Dense",
+        "DBP"
+      ]
+    ],
+    "weight_datasets": {
+      "DBP/DBP/bias:0": [
+        1
+      ],
+      "DBP/DBP/kernel:0": [
+        128,
+        1
+      ],
+      "SBP/SBP/bias:0": [
+        1
+      ],
+      "SBP/SBP/kernel:0": [
+        128,
+        1
+      ],
+      "bidirectional/bidirectional/backward_lstm/lstm_cell_2/bias:0": [
+        256
+      ],
+      "bidirectional/bidirectional/backward_lstm/lstm_cell_2/kernel:0": [
+        32,
+        256
+      ],
+      "bidirectional/bidirectional/backward_lstm/lstm_cell_2/recurrent_kernel:0": [
+        64,
+        256
+      ],
+      "bidirectional/bidirectional/forward_lstm/lstm_cell_1/bias:0": [
+        256
+      ],
+      "bidirectional/bidirectional/forward_lstm/lstm_cell_1/kernel:0": [
+        32,
+        256
+      ],
+      "bidirectional/bidirectional/forward_lstm/lstm_cell_1/recurrent_kernel:0": [
+        64,
+        256
+      ],
+      "bidirectional_1/bidirectional_1/backward_lstm_1/lstm_cell_5/bias:0": [
+        256
+      ],
+      "bidirectional_1/bidirectional_1/backward_lstm_1/lstm_cell_5/kernel:0": [
+        128,
+        256
+      ],
+      "bidirectional_1/bidirectional_1/backward_lstm_1/lstm_cell_5/recurrent_kernel:0": [
+        64,
+        256
+      ],
+      "bidirectional_1/bidirectional_1/forward_lstm_1/lstm_cell_4/bias:0": [
+        256
+      ],
+      "bidirectional_1/bidirectional_1/forward_lstm_1/lstm_cell_4/kernel:0": [
+        128,
+        256
+      ],
+      "bidirectional_1/bidirectional_1/forward_lstm_1/lstm_cell_4/recurrent_kernel:0": [
+        64,
+        256
+      ],
+      "bidirectional_2/bidirectional_2/backward_lstm_2/lstm_cell_8/bias:0": [
+        128
+      ],
+      "bidirectional_2/bidirectional_2/backward_lstm_2/lstm_cell_8/kernel:0": [
+        128,
+        128
+      ],
+      "bidirectional_2/bidirectional_2/backward_lstm_2/lstm_cell_8/recurrent_kernel:0": [
+        32,
+        128
+      ],
+      "bidirectional_2/bidirectional_2/forward_lstm_2/lstm_cell_7/bias:0": [
+        128
+      ],
+      "bidirectional_2/bidirectional_2/forward_lstm_2/lstm_cell_7/kernel:0": [
+        128,
+        128
+      ],
+      "bidirectional_2/bidirectional_2/forward_lstm_2/lstm_cell_7/recurrent_kernel:0": [
+        32,
+        128
+      ],
+      "conv1d_48/conv1d_48/bias:0": [
+        32
+      ],
+      "conv1d_48/conv1d_48/kernel:0": [
+        5,
+        1,
+        32
+      ],
+      "dense_5/dense_5/bias:0": [
+        128
+      ],
+      "dense_5/dense_5/kernel:0": [
+        64,
+        128
+      ]
+    }
+  },
+  "tflite_sha256": "052d675c5fcd7304c90f0e671475c2d60fbff9ddb769c4f0d91a53a7b75b2f8b",
+  "tflite_size_bytes": 1070048,
+  "tflite_mapping": {
+    "sbp_output_slot": 1,
+    "dbp_output_slot": 0,
+    "input_details": [
+      {
+        "name": "serving_default_input_4:0",
+        "shape": [
+          1,
+          875,
+          1
+        ],
+        "dtype": "<class 'numpy.float32'>",
+        "index": 0
+      }
+    ],
+    "output_details": [
+      {
+        "name": "StatefulPartitionedCall_1:1",
+        "shape": [
+          1,
+          1
+        ],
+        "dtype": "<class 'numpy.float32'>",
+        "index": 81
+      },
+      {
+        "name": "StatefulPartitionedCall_1:0",
+        "shape": [
+          1,
+          1
+        ],
+        "dtype": "<class 'numpy.float32'>",
+        "index": 82
+      }
+    ],
+    "ops": [
+      "PAD",
+      "RESHAPE",
+      "CONV_2D",
+      "RESHAPE",
+      "REVERSE_V2",
+      "WHILE",
+      "RESHAPE",
+      "REVERSE_V2",
+      "WHILE",
+      "RESHAPE",
+      "CONCATENATION",
+      "RESHAPE",
+      "REVERSE_V2",
+      "WHILE",
+      "RESHAPE",
+      "REVERSE_V2",
+      "WHILE",
+      "RESHAPE",
+      "CONCATENATION",
+      "RESHAPE",
+      "REVERSE_V2",
+      "WHILE",
+      "STRIDED_SLICE",
+      "WHILE",
+      "STRIDED_SLICE",
+      "CONCATENATION",
+      "FULLY_CONNECTED",
+      "FULLY_CONNECTED",
+      "FULLY_CONNECTED",
+      "DELEGATE",
+      "DELEGATE",
+      "DELEGATE",
+      "DELEGATE",
+      "DELEGATE",
+      "DELEGATE"
+    ]
+  },
+  "tf_vs_oracle": [
+    {
+      "seq": 1,
+      "oracle_sbp": 109.14556884765625,
+      "oracle_dbp": 63.48948669433594,
+      "tf_sbp": 109.14549255371094,
+      "tf_dbp": 63.489498138427734,
+      "delta_sbp": -7.62939453125e-05,
+      "delta_dbp": 1.1444091796875e-05
+    },
+    {
+      "seq": 2,
+      "oracle_sbp": 105.59862518310547,
+      "oracle_dbp": 64.06639099121094,
+      "tf_sbp": 105.5986328125,
+      "tf_dbp": 64.06639099121094,
+      "delta_sbp": 7.62939453125e-06,
+      "delta_dbp": 0.0
+    },
+    {
+      "seq": 3,
+      "oracle_sbp": 110.98808288574219,
+      "oracle_dbp": 65.44562530517578,
+      "tf_sbp": 110.9880599975586,
+      "tf_dbp": 65.44563293457031,
+      "delta_sbp": -2.288818359375e-05,
+      "delta_dbp": 7.62939453125e-06
+    },
+    {
+      "seq": 4,
+      "oracle_sbp": 113.96049499511719,
+      "oracle_dbp": 67.1688003540039,
+      "tf_sbp": 113.96040344238281,
+      "tf_dbp": 67.16879272460938,
+      "delta_sbp": -9.1552734375e-05,
+      "delta_dbp": -7.62939453125e-06
+    },
+    {
+      "seq": 5,
+      "oracle_sbp": 114.73165893554688,
+      "oracle_dbp": 66.2581787109375,
+      "tf_sbp": 114.7316665649414,
+      "tf_dbp": 66.25817108154297,
+      "delta_sbp": 7.62939453125e-06,
+      "delta_dbp": -7.62939453125e-06
+    }
+  ],
+  "tflite_vs_oracle": [
+    {
+      "seq": 1,
+      "oracle_sbp": 109.14556884765625,
+      "oracle_dbp": 63.48948669433594,
+      "tflite_sbp": 109.14552307128906,
+      "tflite_dbp": 63.48948669433594,
+      "delta_sbp": -4.57763671875e-05,
+      "delta_dbp": 0.0,
+      "historical_sbp": 109.15,
+      "historical_dbp": 63.49,
+      "delta_oracle_vs_historical_sbp": -0.004431152343755684,
+      "delta_oracle_vs_historical_dbp": -0.0005133056640644895
+    },
+    {
+      "seq": 2,
+      "oracle_sbp": 105.59862518310547,
+      "oracle_dbp": 64.06639099121094,
+      "tflite_sbp": 105.59861755371094,
+      "tflite_dbp": 64.06639099121094,
+      "delta_sbp": -7.62939453125e-06,
+      "delta_dbp": 0.0,
+      "historical_sbp": 105.6,
+      "historical_dbp": 64.07,
+      "delta_oracle_vs_historical_sbp": -0.0013748168945255657,
+      "delta_oracle_vs_historical_dbp": -0.003609008789055679
+    },
+    {
+      "seq": 3,
+      "oracle_sbp": 110.98808288574219,
+      "oracle_dbp": 65.44562530517578,
+      "tflite_sbp": 110.98804473876953,
+      "tflite_dbp": 65.44562530517578,
+      "delta_sbp": -3.814697265625e-05,
+      "delta_dbp": 0.0,
+      "historical_sbp": 110.99,
+      "historical_dbp": 65.45,
+      "delta_oracle_vs_historical_sbp": -0.001917114257807384,
+      "delta_oracle_vs_historical_dbp": -0.004374694824221592
+    },
+    {
+      "seq": 4,
+      "oracle_sbp": 113.96049499511719,
+      "oracle_dbp": 67.1688003540039,
+      "tflite_sbp": 113.96043395996094,
+      "tflite_dbp": 67.16877746582031,
+      "delta_sbp": -6.103515625e-05,
+      "delta_dbp": -2.288818359375e-05,
+      "historical_sbp": 113.96,
+      "historical_dbp": 67.17,
+      "delta_oracle_vs_historical_sbp": 0.0004949951171937528,
+      "delta_oracle_vs_historical_dbp": -0.0011996459960954553
+    },
+    {
+      "seq": 5,
+      "oracle_sbp": 114.73165893554688,
+      "oracle_dbp": 66.2581787109375,
+      "tflite_sbp": 114.73165893554688,
+      "tflite_dbp": 66.2581787109375,
+      "delta_sbp": 0.0,
+      "delta_dbp": 0.0,
+      "historical_sbp": 114.73,
+      "historical_dbp": 66.26,
+      "delta_oracle_vs_historical_sbp": 0.001658935546871021,
+      "delta_oracle_vs_historical_dbp": -0.001821289062505116
+    }
+  ],
+  "max_abs_tf_delta_sbp": 9.1552734375e-05,
+  "max_abs_tf_delta_dbp": 1.1444091796875e-05,
+  "max_abs_tflite_delta_sbp": 6.103515625e-05,
+  "max_abs_tflite_delta_dbp": 2.288818359375e-05,
+  "max_abs_oracle_vs_historical_sbp": 0.004431152343755684,
+  "max_abs_oracle_vs_historical_dbp": 0.004374694824221592,
+  "select_tf_ops_used": false,
+  "acceptance_mmHg": 0.01
+}
