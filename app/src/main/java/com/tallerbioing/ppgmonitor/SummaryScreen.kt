@@ -44,6 +44,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+import com.tallerbioing.ppgmonitor.bp.BloodPressureStatus
+import com.tallerbioing.ppgmonitor.bp.BloodPressureUiState
+
 import java.time.LocalDate
 
 
@@ -103,7 +106,8 @@ fun SummaryScreen(
         ExploratoryVitalsCard(
             spo2 = if (bleManager.spo2Valid) bleManager.spo2 else null,
             prv = bleManager.prv,
-            connected = bleManager.isConnected
+            connected = bleManager.isConnected,
+            bloodPressure = bleManager.bloodPressureState
         )
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -173,7 +177,8 @@ private fun B18StatusCard(
 private fun ExploratoryVitalsCard(
     spo2: Float?,
     prv: B18Prv?,
-    connected: Boolean
+    connected: Boolean,
+    bloodPressure: BloodPressureUiState
 ) {
 
     val validPrv = prv?.takeIf { it.valid }
@@ -266,15 +271,98 @@ private fun ExploratoryVitalsCard(
             Spacer(modifier = Modifier.height(10.dp))
 
             Text(
-                text = "Presión arterial: pendiente de integración BLE",
-                fontSize = 13.sp,
+                text = "PRESIÓN ARTERIAL EXPERIMENTAL",
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
-                color = TextSecondary
+                color = TextPrimary
+            )
+
+            Spacer(
+                modifier = Modifier.height(5.dp)
             )
 
             Text(
-                text = "B18 no transmite todavía valores sistólico/diastólico en mmHg.",
-                fontSize = 12.sp,
+                text =
+                    if (connected) {
+                        "Estado: ${bloodPressure.status.displayName}"
+                    } else {
+                        "Estado: Sin conexión"
+                    },
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color =
+                    if (
+                        bloodPressure.status ==
+                            BloodPressureStatus.DISPONIBLE
+                    ) {
+                        Green
+                    } else {
+                        TextSecondary
+                    }
+            )
+
+            if (
+                bloodPressure.status ==
+                    BloodPressureStatus.DISPONIBLE &&
+                bloodPressure.systolicMmHg != null &&
+                bloodPressure.diastolicMmHg != null
+            ) {
+                Spacer(
+                    modifier = Modifier.height(4.dp)
+                )
+
+                Text(
+                    text =
+                        "PAS ${String.format("%.0f", bloodPressure.systolicMmHg)} mmHg",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+
+                Text(
+                    text =
+                        "PAD ${String.format("%.0f", bloodPressure.diastolicMmHg)} mmHg",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            } else {
+                val progress =
+                    if (
+                        bloodPressure.status ==
+                            BloodPressureStatus.TRANSFIRIENDO &&
+                        bloodPressure.progressSamples > 0
+                    ) {
+                        " · ${bloodPressure.progressSamples}/700"
+                    } else {
+                        ""
+                    }
+
+                Text(
+                    text =
+                        bloodPressure.status.displayName +
+                            progress,
+                    fontSize = 13.sp,
+                    color = TextSecondary
+                )
+            }
+
+            bloodPressure.message
+                ?.takeIf {
+                    bloodPressure.status ==
+                        BloodPressureStatus.RECHAZADA
+                }
+                ?.let {
+                    Text(
+                        text = it,
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
+                }
+
+            Text(
+                text = "Experimental · No validada clínicamente",
+                fontSize = 11.sp,
                 color = TextSecondary
             )
 
