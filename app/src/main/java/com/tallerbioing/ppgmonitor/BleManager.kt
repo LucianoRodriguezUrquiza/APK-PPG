@@ -28,6 +28,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 
+import com.tallerbioing.ppgmonitor.bp.BloodPressureModel
+import com.tallerbioing.ppgmonitor.bp.BloodPressurePreprocessor
+import com.tallerbioing.ppgmonitor.bp.BloodPressureStatus
+import com.tallerbioing.ppgmonitor.bp.BloodPressureTransportEvent
+import com.tallerbioing.ppgmonitor.bp.BloodPressureUiState
+import com.tallerbioing.ppgmonitor.bp.BloodPressureWindowAssembler
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+
 import java.nio.charset.StandardCharsets
 import java.util.ArrayDeque
 import java.util.UUID
@@ -74,6 +87,8 @@ class BleManager(
             UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
         private val TX_UUID =
             UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val PA_TX_UUID =
+            UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
         private val CCCD_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
     }
@@ -142,6 +157,9 @@ class BleManager(
     var diagnostics by mutableStateOf<B18Diagnostics?>(null)
         private set
 
+    var bloodPressureState by mutableStateOf(BloodPressureUiState())
+        private set
+
     val bpmStateText: String
         get() = when (bpmStateCode) {
             1 -> "Sin contacto"
@@ -188,6 +206,7 @@ class BleManager(
     private var bluetoothGatt: BluetoothGatt? = null
     private var rxCharacteristic: BluetoothGattCharacteristic? = null
     private var txCharacteristic: BluetoothGattCharacteristic? = null
+    private var paCharacteristic: BluetoothGattCharacteristic? = null
 
     private var scanning = false
     private var closed = false
@@ -196,6 +215,7 @@ class BleManager(
 
     private var gattConnected = false
     private var subscribed = false
+    private var paSubscribed = false
     private var negotiated = false
     private var mtuPending = false
     private var activeDevice: BluetoothDevice? = null
@@ -215,6 +235,26 @@ class BleManager(
     private var spo2ReceivedElapsed = 0L
     private var spo2AgeAtReceive: Long? = null
     private var prvReceivedElapsed = 0L
+
+    private val bloodPressureAssembler =
+        BloodPressureWindowAssembler()
+
+    private val bloodPressureScope =
+        CoroutineScope(
+            SupervisorJob() + Dispatchers.Default
+        )
+
+    private val bloodPressureModelLock =
+        Any()
+
+    private var bloodPressureModel:
+        BloodPressureModel? = null
+
+    private var bloodPressureInferenceRunning =
+        false
+
+    private var bloodPressureSessionGeneration =
+        0L
 
     private data class PendingCommand(
         val command: String,
@@ -304,6 +344,11 @@ class BleManager(
         bluetoothGatt = null
         activeDevice = null
         onTelemetryReceived = null
+        bloodPressureScope.cancel()
+        synchronized(bloodPressureModelLock) {
+            bloodPressureModel?.close()
+            bloodPressureModel = null
+        }
         connectionState = "Desconectado"
     }
 
@@ -495,6 +540,7 @@ class BleManager(
             val service = gatt.getService(SERVICE_UUID)
             val rx = service?.getCharacteristic(RX_UUID)
             val tx = service?.getCharacteristic(TX_UUID)
+            val pa = service?.getCharacteristic(PA_TX_UUID)
 
             if (service == null || rx == null || tx == null) {
                 failCurrentGatt("Nordic UART Service B18 no encontrado")
@@ -503,6 +549,7 @@ class BleManager(
 
             rxCharacteristic = rx
             txCharacteristic = tx
+            paCharacteristic = pa
 
             onMain { connectionState = "Negociando MTU..." }
 
@@ -541,23 +588,75 @@ class BleManager(
         ) {
             if (gatt !== bluetoothGatt || descriptor.uuid != CCCD_UUID) return
 
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                failCurrentGatt("No se pudo habilitar Notify: $status")
-                return
-            }
+            when (descriptor.characteristic.uuid) {
+                TX_UUID -> {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        failCurrentGatt("No se pudo habilitar Notify B18: $status")
+                        return
+                    }
 
-            subscribed = true
-            onMain { connectionState = "Negociando protocolo B18..." }
-            sendHello()
+                    subscribed = true
+
+                    if (paCharacteristic != null) {
+                        enablePaNotifications(gatt)
+                    } else {
+                        paSubscribed = false
+                        onMain {
+                            bloodPressureState =
+                                BloodPressureUiState(
+                                    status = BloodPressureStatus.RECHAZADA,
+                                    message = "Firmware sin transporte PA B19"
+                                )
+                            connectionState = "Negociando protocolo B18..."
+                        }
+                        sendHello()
+                    }
+                }
+
+                PA_TX_UUID -> {
+                    paSubscribed =
+                        status == BluetoothGatt.GATT_SUCCESS
+
+                    onMain {
+                        bloodPressureState =
+                            if (paSubscribed) {
+                                BloodPressureUiState(
+                                    status = BloodPressureStatus.SENSANDO
+                                )
+                            } else {
+                                BloodPressureUiState(
+                                    status = BloodPressureStatus.RECHAZADA,
+                                    message = "No se pudo habilitar Notify PA"
+                                )
+                            }
+
+                        connectionState =
+                            "Negociando protocolo B18..."
+                    }
+
+                    sendHello()
+                }
+            }
         }
 
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            if (gatt !== bluetoothGatt || characteristic.uuid != TX_UUID) return
+            if (gatt !== bluetoothGatt) return
             val copy = characteristic.value?.clone() ?: return
-            onMain { consumeNotification(copy) }
+
+            when (characteristic.uuid) {
+                TX_UUID ->
+                    onMain {
+                        consumeNotification(copy)
+                    }
+
+                PA_TX_UUID ->
+                    onMain {
+                        consumePaNotification(copy)
+                    }
+            }
         }
 
         override fun onCharacteristicChanged(
@@ -565,9 +664,20 @@ class BleManager(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            if (gatt !== bluetoothGatt || characteristic.uuid != TX_UUID) return
+            if (gatt !== bluetoothGatt) return
             val copy = value.clone()
-            onMain { consumeNotification(copy) }
+
+            when (characteristic.uuid) {
+                TX_UUID ->
+                    onMain {
+                        consumeNotification(copy)
+                    }
+
+                PA_TX_UUID ->
+                    onMain {
+                        consumePaNotification(copy)
+                    }
+            }
         }
 
         override fun onCharacteristicWrite(
@@ -645,6 +755,103 @@ class BleManager(
             failCurrentGatt("No se pudo iniciar escritura CCCD")
         }
     }
+
+
+    @SuppressLint("MissingPermission")
+    private fun enablePaNotifications(
+        gatt: BluetoothGatt
+    ) {
+        if (gatt !== bluetoothGatt) return
+
+        val pa =
+            paCharacteristic
+                ?: run {
+                    paSubscribed = false
+                    onMain {
+                        connectionState =
+                            "Negociando protocolo B18..."
+                    }
+                    sendHello()
+                    return
+                }
+
+        onMain {
+            connectionState =
+                "Activando transporte PA..."
+        }
+
+        if (!gatt.setCharacteristicNotification(pa, true)) {
+            paSubscribed = false
+            onMain {
+                bloodPressureState =
+                    BloodPressureUiState(
+                        status = BloodPressureStatus.RECHAZADA,
+                        message = "No se pudo activar Notify PA"
+                    )
+                connectionState =
+                    "Negociando protocolo B18..."
+            }
+            sendHello()
+            return
+        }
+
+        val descriptor =
+            pa.getDescriptor(CCCD_UUID)
+
+        if (descriptor == null) {
+            paSubscribed = false
+            onMain {
+                bloodPressureState =
+                    BloodPressureUiState(
+                        status = BloodPressureStatus.RECHAZADA,
+                        message = "CCCD PA no encontrado"
+                    )
+                connectionState =
+                    "Negociando protocolo B18..."
+            }
+            sendHello()
+            return
+        }
+
+        val value =
+            BluetoothGattDescriptor
+                .ENABLE_NOTIFICATION_VALUE
+
+        val started =
+            if (
+                Build.VERSION.SDK_INT >=
+                    Build.VERSION_CODES.TIRAMISU
+            ) {
+                gatt.writeDescriptor(
+                    descriptor,
+                    value
+                ) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    descriptor.value = value
+                    gatt.writeDescriptor(
+                        descriptor
+                    )
+                }
+            }
+
+        if (!started) {
+            paSubscribed = false
+            onMain {
+                bloodPressureState =
+                    BloodPressureUiState(
+                        status = BloodPressureStatus.RECHAZADA,
+                        message = "No se pudo iniciar CCCD PA"
+                    )
+                connectionState =
+                    "Negociando protocolo B18..."
+            }
+            sendHello()
+        }
+    }
+
 
     // ---------------------------------------------------------------------
     // Negociación y framing
@@ -769,6 +976,21 @@ class BleManager(
             epoch = hello.epoch
             isConnected = true
             connectionState = "Conectado - B18 v2"
+
+            bloodPressureState =
+                if (paCharacteristic != null && paSubscribed) {
+                    BloodPressureUiState(
+                        status =
+                            BloodPressureStatus.SENSANDO
+                    )
+                } else {
+                    BloodPressureUiState(
+                        status =
+                            BloodPressureStatus.RECHAZADA,
+                        message =
+                            "Transporte PA B19 no disponible"
+                    )
+                }
 
             // Un epoch nuevo parte con STREAM=20. Sólo hay que restaurar una
             // preferencia diferente del valor por defecto.
@@ -910,6 +1132,177 @@ class BleManager(
             )
         }
     }
+
+
+    private fun consumePaNotification(
+        bytes: ByteArray
+    ) {
+        if (
+            !gattConnected ||
+            !paSubscribed ||
+            !negotiated
+        ) {
+            return
+        }
+
+        when (
+            val event =
+                bloodPressureAssembler
+                    .offer(bytes)
+        ) {
+            is BloodPressureTransportEvent.Began -> {
+                bloodPressureState =
+                    BloodPressureUiState(
+                        status =
+                            BloodPressureStatus.TRANSFIRIENDO,
+                        windowSeq =
+                            event.windowSeq,
+                        progressSamples = 0
+                    )
+            }
+
+            is BloodPressureTransportEvent.Progress -> {
+                bloodPressureState =
+                    BloodPressureUiState(
+                        status =
+                            BloodPressureStatus.TRANSFIRIENDO,
+                        windowSeq =
+                            event.windowSeq,
+                        progressSamples =
+                            event.receivedSamples,
+                        message =
+                            "${event.receivedSamples}/" +
+                                "${event.totalSamples} muestras"
+                    )
+            }
+
+            is BloodPressureTransportEvent.Rejected -> {
+                bloodPressureState =
+                    BloodPressureUiState(
+                        status =
+                            BloodPressureStatus.RECHAZADA,
+                        message =
+                            event.reason
+                    )
+            }
+
+            is BloodPressureTransportEvent.Complete -> {
+                runBloodPressureInference(
+                    event.window.windowSeq,
+                    event.window.samples
+                )
+            }
+        }
+    }
+
+
+    private fun runBloodPressureInference(
+        windowSeq: Long,
+        rawIr: LongArray
+    ) {
+        if (bloodPressureInferenceRunning) {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.RECHAZADA,
+                    windowSeq =
+                        windowSeq,
+                    message =
+                        "Inferencia PA ocupada"
+                )
+            return
+        }
+
+        bloodPressureInferenceRunning = true
+
+        val generation =
+            bloodPressureSessionGeneration
+
+        bloodPressureState =
+            BloodPressureUiState(
+                status =
+                    BloodPressureStatus.CALCULANDO,
+                windowSeq =
+                    windowSeq
+            )
+
+        bloodPressureScope.launch {
+            try {
+                val normalized =
+                    BloodPressurePreprocessor
+                        .preprocess(rawIr)
+                        .normalized
+
+                val model =
+                    synchronized(
+                        bloodPressureModelLock
+                    ) {
+                        bloodPressureModel
+                            ?: BloodPressureModel
+                                .fromAssets(
+                                    context.applicationContext,
+                                    numThreads = 2
+                                )
+                                .also {
+                                    bloodPressureModel = it
+                                }
+                    }
+
+                val estimate =
+                    model.predict(normalized)
+
+                mainHandler.post {
+                    bloodPressureInferenceRunning =
+                        false
+
+                    if (
+                        generation !=
+                            bloodPressureSessionGeneration
+                    ) {
+                        return@post
+                    }
+
+                    bloodPressureState =
+                        BloodPressureUiState(
+                            status =
+                                BloodPressureStatus.DISPONIBLE,
+                            systolicMmHg =
+                                estimate.systolicMmHg,
+                            diastolicMmHg =
+                                estimate.diastolicMmHg,
+                            windowSeq =
+                                windowSeq
+                        )
+                }
+            } catch (
+                error: Throwable
+            ) {
+                mainHandler.post {
+                    bloodPressureInferenceRunning =
+                        false
+
+                    if (
+                        generation !=
+                            bloodPressureSessionGeneration
+                    ) {
+                        return@post
+                    }
+
+                    bloodPressureState =
+                        BloodPressureUiState(
+                            status =
+                                BloodPressureStatus.RECHAZADA,
+                            windowSeq =
+                                windowSeq,
+                            message =
+                                error.message
+                                    ?: "Ventana PA rechazada"
+                        )
+                }
+            }
+        }
+    }
+
 
     // ---------------------------------------------------------------------
     // Caducidad local
@@ -1114,6 +1507,14 @@ class BleManager(
         prv = null
         diagnostics = null
 
+        bloodPressureAssembler.reset()
+        bloodPressureSessionGeneration += 1L
+        bloodPressureState =
+            BloodPressureUiState(
+                status =
+                    BloodPressureStatus.SENSANDO
+            )
+
         lastBReceivedElapsed = 0L
         lastSReceivedElapsed = 0L
         spo2ReceivedElapsed = 0L
@@ -1142,8 +1543,10 @@ class BleManager(
 
         gattConnected = false
         mtuPending = false
+        paSubscribed = false
         rxCharacteristic = null
         txCharacteristic = null
+        paCharacteristic = null
 
         clearLiveValues()
     }
