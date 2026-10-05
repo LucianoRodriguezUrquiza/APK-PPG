@@ -218,6 +218,9 @@ class BleManager(
     private var subscribed = false
     private var paSubscribed = false
     private var paSetupRetryUsed = false
+    private var paGattCacheRefreshUsed = false
+    private var paGattCacheReconnectPending = false
+    private var paGattCacheRefreshDetail = "no ejecutado"
     private var negotiated = false
     private var mtuPending = false
     private var activeDevice: BluetoothDevice? = null
@@ -518,6 +521,62 @@ class BleManager(
             }
 
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                if (
+                    paGattCacheReconnectPending &&
+                    (bluetoothGatt == null || bluetoothGatt === gatt)
+                ) {
+                    paGattCacheReconnectPending = false
+                    bluetoothGatt = gatt
+
+                    val device =
+                        activeDevice ?: gatt.device
+
+                    val refreshResult =
+                        refreshGattCache(gatt)
+
+                    paGattCacheRefreshDetail =
+                        refreshResult.second
+
+                    Log.w(
+                        TAG,
+                        "PA B19: refresh GATT cache -> " +
+                            "${refreshResult.second}; reconectando una única vez"
+                    )
+
+                    clearSessionState()
+                    gatt.close()
+
+                    if (bluetoothGatt === gatt) {
+                        bluetoothGatt = null
+                    }
+
+                    onMain {
+                        bloodPressureState =
+                            BloodPressureUiState(
+                                status =
+                                    BloodPressureStatus.SENSANDO,
+                                message =
+                                    "PA B19: caché GATT actualizada; reconectando (1/1)..."
+                            )
+                        connectionState =
+                            "Reconectando tras limpiar caché GATT..."
+                    }
+
+                    mainHandler.postDelayed(
+                        {
+                            if (
+                                !closed &&
+                                !gattConnected
+                            ) {
+                                connectToDevice(device)
+                            }
+                        },
+                        600L
+                    )
+
+                    return
+                }
+
                 if (bluetoothGatt == null || bluetoothGatt === gatt) {
                     bluetoothGatt = gatt
                     handleDisconnectedGatt(
@@ -572,8 +631,18 @@ class BleManager(
                     return
                 }
 
+                if (
+                    requestPaGattCacheRefreshReconnectOnce(
+                        gatt,
+                        "UUID ...0004 siguió ausente tras redescubrir servicios"
+                    )
+                ) {
+                    return
+                }
+
                 setPaRejected(
-                    "PA B19: UUID ...0004 no fue descubierta tras 1 reintento"
+                    "PA B19: UUID ...0004 sigue sin aparecer incluso tras limpiar caché " +
+                        "GATT y reconectar. refresh=$paGattCacheRefreshDetail"
                 )
             } else if (paCccd == null) {
                 if (
@@ -585,8 +654,18 @@ class BleManager(
                     return
                 }
 
+                if (
+                    requestPaGattCacheRefreshReconnectOnce(
+                        gatt,
+                        "UUID ...0004 apareció sin CCCD 0x2902"
+                    )
+                ) {
+                    return
+                }
+
                 setPaRejected(
-                    "PA B19: UUID ...0004 existe, pero no tiene CCCD 0x2902 tras 1 reintento"
+                    "PA B19: UUID ...0004 existe pero CCCD 0x2902 sigue ausente incluso " +
+                        "tras limpiar caché GATT y reconectar. refresh=$paGattCacheRefreshDetail"
                 )
             } else {
                 onMain {
@@ -640,11 +719,21 @@ class BleManager(
                         paSubscribed = false
 
                         if (
+                            requestPaGattCacheRefreshReconnectOnce(
+                                gatt,
+                                "UUID ...0004 no disponible al habilitar notificaciones"
+                            )
+                        ) {
+                            return
+                        }
+
+                        if (
                             bloodPressureState.status !=
                                 BloodPressureStatus.RECHAZADA
                         ) {
                             setPaRejected(
-                                "PA B19: UUID ...0004 no descubierta"
+                                "PA B19: UUID ...0004 no disponible tras refresh/reconexión. " +
+                                    "refresh=$paGattCacheRefreshDetail"
                             )
                         }
 
@@ -858,6 +947,101 @@ class BleManager(
 
         return true
     }
+
+
+    @SuppressLint("MissingPermission")
+    private fun requestPaGattCacheRefreshReconnectOnce(
+        gatt: BluetoothGatt,
+        reason: String
+    ): Boolean {
+        if (
+            paGattCacheRefreshUsed ||
+            paGattCacheReconnectPending
+        ) {
+            return false
+        }
+
+        paGattCacheRefreshUsed = true
+        paGattCacheReconnectPending = true
+
+        Log.w(
+            TAG,
+            "PA B19: $reason; solicitando refresh GATT + reconexión única"
+        )
+
+        onMain {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.SENSANDO,
+                    message =
+                        "PA B19: $reason. Limpiando caché GATT y reconectando (1/1)..."
+                )
+            connectionState =
+                "Limpiando caché GATT PA..."
+        }
+
+        try {
+            gatt.disconnect()
+        } catch (
+            error: SecurityException
+        ) {
+            paGattCacheReconnectPending = false
+
+            val refreshResult =
+                refreshGattCache(gatt)
+
+            paGattCacheRefreshDetail =
+                refreshResult.second
+
+            setPaRejected(
+                "PA B19: no se pudo desconectar para refrescar caché GATT. " +
+                    "refresh=$paGattCacheRefreshDetail"
+            )
+        }
+
+        return true
+    }
+
+
+    private fun refreshGattCache(
+        gatt: BluetoothGatt
+    ): Pair<Boolean, String> =
+        try {
+            val method =
+                gatt.javaClass.getMethod(
+                    "refresh"
+                )
+
+            val result =
+                method.invoke(gatt)
+
+            val ok =
+                (result as? Boolean) == true
+
+            Pair(
+                ok,
+                if (ok) {
+                    "refresh() OK"
+                } else {
+                    "refresh() devolvió false"
+                }
+            )
+        } catch (
+            error: Throwable
+        ) {
+            Log.w(
+                TAG,
+                "PA B19: BluetoothGatt.refresh() no disponible",
+                error
+            )
+
+            Pair(
+                false,
+                "refresh() no disponible: " +
+                    error.javaClass.simpleName
+            )
+        }
 
 
     private fun setPaRejected(
