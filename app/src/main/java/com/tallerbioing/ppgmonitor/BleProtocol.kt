@@ -1,7 +1,5 @@
 package com.tallerbioing.ppgmonitor
 
-import kotlin.math.abs
-
 /**
  * Contrato Android del protocolo BLE B18 v2.
  *
@@ -229,17 +227,21 @@ object BleProtocol {
         val f = line.split(' ')
         if (f.size != 10) return null
 
-        val bpm = intOrNa(tag(f[0], "B:") ?: return null, 0, 999)
+        val bpmToken = nullableInt(tag(f[0], "B:") ?: return null, 0, 999) ?: return null
         val activity = int(tag(f[1], "A:") ?: return null, 0, 3) ?: return null
         val quality = int(tag(f[2], "C:") ?: return null, 0, 4) ?: return null
         if (quality == 1) return null
-        val battery = intOrNa(tag(f[3], "P:") ?: return null, 0, 100)
+        val batteryToken = nullableInt(tag(f[3], "P:") ?: return null, 0, 100) ?: return null
         val sequence = u32(tag(f[4], "I:") ?: return null) ?: return null
         val time = u32(tag(f[5], "T:") ?: return null) ?: return null
         val visible = bool(tag(f[6], "V:") ?: return null) ?: return null
         val state = int(tag(f[7], "E:") ?: return null, 0, 6) ?: return null
-        val age = u32OrNa(tag(f[8], "D:") ?: return null)
+        val ageToken = nullableU32(tag(f[8], "D:") ?: return null) ?: return null
         val sourceSeq = u32(tag(f[9], "N:") ?: return null) ?: return null
+
+        val bpm = bpmToken.value
+        val battery = batteryToken.value
+        val age = ageToken.value
 
         return B18Bpm(
             bpm = bpm,
@@ -261,13 +263,13 @@ object BleProtocol {
 
         val sequence = u32(p[0].substring(2)) ?: return null
         val valid = bool(p[3]) ?: return null
-        val sampleTime = u32OrNa(p[1])
-        val value = floatOrNa(p[2], -999999f, 999999f)
+        val sampleTime = nullableU32(p[1]) ?: return null
+        val value = nullableFloat(p[2], -999999f, 999999f) ?: return null
 
-        if (valid && (sampleTime == null || value == null)) return null
-        if (!valid && (p[1] != "NA" || p[2] != "NA")) return null
+        if (valid && (sampleTime.value == null || value.value == null)) return null
+        if (!valid && (sampleTime.value != null || value.value != null)) return null
 
-        return B18Ppg(sequence, sampleTime, value, valid)
+        return B18Ppg(sequence, sampleTime.value, value.value, valid)
     }
 
     private fun parseSpo2(line: String): B18Spo2? {
@@ -276,15 +278,15 @@ object BleProtocol {
 
         val sequence = u32(p[0].substring(2)) ?: return null
         val time = u32(p[1]) ?: return null
-        val value = floatOrNa(p[2], 0f, 100f)
+        val value = nullableFloat(p[2], 0f, 100f) ?: return null
         val valid = bool(p[3]) ?: return null
-        val age = u32OrNa(p[4])
+        val age = nullableU32(p[4]) ?: return null
         val reason = int(p[5], 0, 5) ?: return null
 
-        if (valid && (value == null || age == null || reason != 0)) return null
-        if (!valid && p[2] != "NA") return null
+        if (valid && (value.value == null || age.value == null || reason != 0)) return null
+        if (!valid && value.value != null) return null
 
-        return B18Spo2(sequence, time, value, valid, age, reason)
+        return B18Spo2(sequence, time, value.value, valid, age.value, reason)
     }
 
     private fun parsePrv(line: String): B18Prv? {
@@ -294,26 +296,27 @@ object BleProtocol {
         val sequence = u32(p[0].substring(2)) ?: return null
         val time = u32(p[1]) ?: return null
         val valid = bool(p[2]) ?: return null
-        val age = u32OrNa(p[3])
+        val age = nullableU32(p[3]) ?: return null
         val span = u32(p[4]) ?: return null
         val nn = u32(p[5]) ?: return null
         val total = u32(p[6]) ?: return null
         val pairs = u32(p[7]) ?: return null
         val clean = int(p[8], 0, 100) ?: return null
-        val pp = floatOrNa(p[9], 0f, 100000f)
-        val rmssd = floatOrNa(p[10], 0f, 100000f)
-        val sdnn = floatOrNa(p[11], 0f, 100000f)
-        val pnn50 = floatOrNa(p[12], 0f, 100f)
+        val pp = nullableFloat(p[9], 0f, 100000f) ?: return null
+        val rmssd = nullableFloat(p[10], 0f, 100000f) ?: return null
+        val sdnn = nullableFloat(p[11], 0f, 100000f) ?: return null
+        val pnn50 = nullableFloat(p[12], 0f, 100f) ?: return null
         val irregular = u32(p[13]) ?: return null
         val patterns = u32(p[14]) ?: return null
-        val flag = boolOrNa(p[15])
+        val flag = nullableBool(p[15]) ?: return null
 
-        if (valid && listOf(pp, rmssd, sdnn, pnn50).any { it == null }) return null
-        if (!valid && listOf(p[9], p[10], p[11], p[12], p[15]).any { it != "NA" }) return null
+        if (valid && listOf(pp.value, rmssd.value, sdnn.value, pnn50.value).any { it == null }) return null
+        if (!valid && listOf(pp.value, rmssd.value, sdnn.value, pnn50.value).any { it != null }) return null
+        if (!valid && flag.value != null) return null
 
         return B18Prv(
-            sequence, time, valid, age, span, nn, total, pairs, clean,
-            pp, rmssd, sdnn, pnn50, irregular, patterns, flag
+            sequence, time, valid, age.value, span, nn, total, pairs, clean,
+            pp.value, rmssd.value, sdnn.value, pnn50.value, irregular, patterns, flag.value
         )
     }
 
@@ -350,14 +353,22 @@ object BleProtocol {
     private fun int(value: String, min: Int, max: Int): Int? =
         value.toIntOrNull()?.takeIf { it in min..max }
 
-    private fun intOrNa(value: String, min: Int, max: Int): Int? =
-        if (value == "NA") null else int(value, min, max)
+    private data class NullableToken<T>(val value: T?)
+
+    private fun nullableInt(
+        value: String,
+        min: Int,
+        max: Int
+    ): NullableToken<Int>? =
+        if (value == "NA") NullableToken(null)
+        else int(value, min, max)?.let { NullableToken(it) }
 
     private fun u32(value: String): Long? =
         value.toLongOrNull()?.takeIf { it in 0L..UINT32_MASK }
 
-    private fun u32OrNa(value: String): Long? =
-        if (value == "NA") null else u32(value)
+    private fun nullableU32(value: String): NullableToken<Long>? =
+        if (value == "NA") NullableToken(null)
+        else u32(value)?.let { NullableToken(it) }
 
     private fun bool(value: String): Boolean? = when (value) {
         "0" -> false
@@ -365,13 +376,18 @@ object BleProtocol {
         else -> null
     }
 
-    private fun boolOrNa(value: String): Boolean? =
-        if (value == "NA") null else bool(value)
+    private fun nullableBool(value: String): NullableToken<Boolean>? =
+        if (value == "NA") NullableToken(null)
+        else bool(value)?.let { NullableToken(it) }
 
-    private fun floatOrNa(value: String, min: Float, max: Float): Float? {
-        if (value == "NA") return null
+    private fun nullableFloat(
+        value: String,
+        min: Float,
+        max: Float
+    ): NullableToken<Float>? {
+        if (value == "NA") return NullableToken(null)
         val parsed = value.toFloatOrNull() ?: return null
         if (!parsed.isFinite() || parsed < min || parsed > max) return null
-        return parsed
+        return NullableToken(parsed)
     }
 }
