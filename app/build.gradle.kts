@@ -128,6 +128,17 @@ dependencies {
 
 
     // ========================================================================
+    // BLOOD PRESSURE MODEL (B19)
+    // ========================================================================
+
+    // Standard float32 TensorFlow Lite runtime. The model was converted with
+    // TFLITE_BUILTINS only; no SELECT_TF_OPS / Flex dependency is required.
+    implementation(
+        "org.tensorflow:tensorflow-lite:2.17.0"
+    )
+
+
+    // ========================================================================
     // TESTS
     // ========================================================================
 
