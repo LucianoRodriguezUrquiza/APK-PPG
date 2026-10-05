@@ -97,6 +97,7 @@ fun ConnectivityScreen(
         internalState.contains("buscando") ||
                 internalState.contains("conectando") ||
                 internalState.contains("descubriendo") ||
+                internalState.contains("negociando") ||
                 internalState.contains("activando")
 
 
