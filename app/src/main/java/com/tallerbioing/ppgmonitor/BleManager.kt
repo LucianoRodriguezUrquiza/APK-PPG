@@ -18,1857 +18,1104 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-
 import androidx.core.content.ContextCompat
 
+import java.nio.charset.StandardCharsets
+import java.util.ArrayDeque
 import java.util.UUID
 
-
-// ============================================================================
-// BLE MANAGER
-// ============================================================================
-//
-// ESP32 -> Android:
-//
-// - Telemetría:
-//      B:078 A:0 C:4 P:084
-//
-// - Stream PPG filtrado:
-//      S:-123.45
-//
-// - Respuestas:
-//      ACK:...
-//      ERR:...
-//
-//
-// Android -> ESP32:
-//
-// - SCREEN:0
-// - SCREEN:1
-// - SCREEN:2
-//
-// - MODE:USO
-// - MODE:CARGA
-//
-//
-// Incluye:
-//
-// - reconexión automática
-// - restauración automática del modo
-// - recepción PPG en tiempo real
-//
-// ============================================================================
-
+/**
+ * Gestor BLE de APK-PPG para el contrato B18 v2.
+ *
+ * Responsabilidades:
+ * - scan / conexión / reconexión;
+ * - NUS GATT;
+ * - negociación MTU sin depender de obtener 247;
+ * - suscripción CCCD antes de HELLO:2;
+ * - ensamblado por LF y parsing v2;
+ * - cola serializada de escrituras;
+ * - caducidad de B/S/O/R;
+ * - exposición de estados a Compose.
+ *
+ * No recalcula BPM, SpO2 ni PRV.
+ */
 class BleManager(
     private val context: Context
 ) {
 
     companion object {
-
-        // ====================================================================
-        // DISPOSITIVO
-        // ====================================================================
-
-        private const val DEVICE_NAME =
-            "PPG-Monitor-S3"
-
-
-        // ====================================================================
-        // RECONEXIÓN
-        // ====================================================================
-
-        private const val RECONNECT_DELAY_MS =
-            2000L
-
-
-        private const val SCAN_TIMEOUT_MS =
-            10000L
-
-
-        private const val MODE_RESEND_DELAY_MS =
-            350L
-
-
-        // ====================================================================
-        // PPG
-        //
-        // Firmware:
-        // 20 muestras por segundo
-        //
-        // 240 muestras ≈ 12 segundos visibles
-        // ====================================================================
-
-        private const val MAX_PPG_SAMPLES =
-            240
-
-
-        // ====================================================================
-        // NORDIC UART SERVICE
-        // ====================================================================
+        private const val DEVICE_NAME = "PPG-Monitor-S3"
+        private const val RECONNECT_DELAY_MS = 2_000L
+        private const val SCAN_TIMEOUT_MS = 10_000L
+        private const val HELLO_TIMEOUT_MS = 2_000L
+        private const val COMMAND_TIMEOUT_MS = 2_000L
+        private const val PARTIAL_TIMEOUT_MS = B18_PARTIAL_TIMEOUT_MS
+        private const val B_STALE_MS = 2_000L
+        private const val S_STALE_MS = 500L
+        private const val SPO2_MAX_AGE_MS = 2_500L
+        private const val PRV_MAX_AGE_MS = 6_000L
+        private const val MAX_HELLO_ATTEMPTS = 3
+        private const val MAX_COMMAND_ATTEMPTS = 2
+        private const val MAX_PPG_SAMPLES = 240
 
         private val SERVICE_UUID =
-            UUID.fromString(
-                "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-            )
-
-
-        // Android -> ESP32
+            UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
         private val RX_UUID =
-            UUID.fromString(
-                "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-            )
-
-
-        // ESP32 -> Android
+            UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
         private val TX_UUID =
-            UUID.fromString(
-                "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
-            )
-
-
+            UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
         private val CCCD_UUID =
-            UUID.fromString(
-                "00002902-0000-1000-8000-00805F9B34FB"
-            )
+            UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
     }
 
+    // ---------------------------------------------------------------------
+    // Estado observable
+    // ---------------------------------------------------------------------
 
-    // =========================================================================
-    // ESTADOS DE INTERFAZ
-    // =========================================================================
-
-    var connectionState by
-    mutableStateOf(
-        "Desconectado"
-    )
+    var connectionState by mutableStateOf("Desconectado")
         private set
 
-
-    var isConnected by
-    mutableStateOf(
-        false
-    )
+    /**
+     * true sólo cuando GATT está conectado, TX está suscripto y H:2 fue validado.
+     */
+    var isConnected by mutableStateOf(false)
         private set
 
-
-    var lastPacket by
-    mutableStateOf(
-        "Sin datos"
-    )
+    var lastPacket by mutableStateOf("Sin datos")
         private set
 
-
-    // =========================================================================
-    // TELEMETRÍA
-    // =========================================================================
-
-    var bpm by
-    mutableIntStateOf(
-        0
-    )
+    var negotiatedMtu by mutableIntStateOf(23)
         private set
 
-
-    var activityCode by
-    mutableIntStateOf(
-        -1
-    )
+    var bootId by mutableStateOf<String?>(null)
         private set
 
-
-    var signalQuality by
-    mutableIntStateOf(
-        0
-    )
+    var epoch by mutableStateOf<Long?>(null)
         private set
 
-
-    var batteryPercentage by
-    mutableIntStateOf(
-        -1
-    )
+    var bpm by mutableIntStateOf(0)
         private set
 
+    var bpmVisible by mutableStateOf(false)
+        private set
 
-    // =========================================================================
-    // PPG EN TIEMPO REAL
-    //
-    // Se mantiene únicamente en memoria.
-    //
-    // NO se guarda en Room.
-    // NO se exporta automáticamente.
-    //
-    // =========================================================================
+    var bpmStateCode by mutableIntStateOf(0)
+        private set
 
-    private val _ppgSamples =
-        mutableStateListOf<Float>()
+    var bpmAgeMs by mutableStateOf<Long?>(null)
+        private set
 
+    var bpmSourceSequence by mutableStateOf<Long?>(null)
+        private set
 
+    var activityCode by mutableIntStateOf(-1)
+        private set
+
+    var signalQuality by mutableIntStateOf(0)
+        private set
+
+    var batteryPercentage by mutableIntStateOf(-1)
+        private set
+
+    var spo2 by mutableStateOf<Float?>(null)
+        private set
+
+    var spo2Valid by mutableStateOf(false)
+        private set
+
+    var spo2Reason by mutableIntStateOf(1)
+        private set
+
+    var prv by mutableStateOf<B18Prv?>(null)
+        private set
+
+    var diagnostics by mutableStateOf<B18Diagnostics?>(null)
+        private set
+
+    val bpmStateText: String
+        get() = when (bpmStateCode) {
+            1 -> "Sin contacto"
+            2 -> "Estabilizando"
+            3 -> "Calculando"
+            4 -> "Actualizado"
+            5 -> "Retenido"
+            6 -> "Último / recalculando"
+            else -> "Sin datos"
+        }
+
+    val signalQualityText: String
+        get() = when (signalQuality) {
+            2 -> "Baja"
+            3 -> "Media"
+            4 -> "Alta"
+            else -> "Sin señal utilizable"
+        }
+
+    // PPG continúa siendo sólo memoria. Los cortes se implementan vaciando la
+    // ventana al detectar invalidez, discontinuidad o stream vencido.
+    private val _ppgSamples = mutableStateListOf<Float>()
     val ppgSamples: List<Float>
-        get() =
-            _ppgSamples
+        get() = _ppgSamples
 
+    /**
+     * Callback sólo para candidatos aptos para persistencia. MeasurementRecorder
+     * aplica además deduplicación por boot/N y el intervalo histórico de 5 s.
+     */
+    var onTelemetryReceived: ((B18Bpm, String, Long) -> Unit)? = null
 
-    // =========================================================================
-    // CALLBACK DE TELEMETRÍA
-    //
-    // Este callback sigue siendo únicamente para:
-    //
-    // BPM
-    // actividad
-    // calidad
-    // batería
-    //
-    // El stream S: NO pasa por este callback.
-    //
-    // =========================================================================
+    // ---------------------------------------------------------------------
+    // Android / BLE
+    // ---------------------------------------------------------------------
 
-    var onTelemetryReceived:
-            ((Int, Int, Int, Int) -> Unit)? =
-        null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-
-    // =========================================================================
-    // OBJETOS BLE
-    // =========================================================================
-
-    private val mainHandler:
-            Handler =
-        Handler(
-            Looper.getMainLooper()
-        )
-
-
-    private val bluetoothManager:
-            BluetoothManager? =
-        context.getSystemService(
-            BluetoothManager::class.java
-        )
-
+    private val bluetoothManager: BluetoothManager? =
+        context.getSystemService(BluetoothManager::class.java)
 
     private val bluetoothAdapter
-        get() =
-            bluetoothManager?.adapter
+        get() = bluetoothManager?.adapter
 
+    private var bluetoothGatt: BluetoothGatt? = null
+    private var rxCharacteristic: BluetoothGattCharacteristic? = null
+    private var txCharacteristic: BluetoothGattCharacteristic? = null
 
-    private var bluetoothGatt:
-            BluetoothGatt? =
-        null
+    private var scanning = false
+    private var closed = false
+    private var reconnectScheduled = false
+    private var autoReconnectEnabled = true
 
+    private var gattConnected = false
+    private var subscribed = false
+    private var negotiated = false
+    private var activeDevice: BluetoothDevice? = null
 
-    private var rxCharacteristic:
-            BluetoothGattCharacteristic? =
-        null
+    private val assembler = B18LineAssembler()
+    private var partialStartedAtElapsed = 0L
+    private var negotiationStarted = false
 
+    private var helloAttempts = 0
+    private var desiredStreamHz = 20
 
-    private var txCharacteristic:
-            BluetoothGattCharacteristic? =
-        null
+    private var lastBReceivedElapsed = 0L
+    private var lastSReceivedElapsed = 0L
+    private var lastPpgSequence: Long? = null
+    private var lastPpgSampleTime: Long? = null
 
+    private var spo2ReceivedElapsed = 0L
+    private var prvReceivedElapsed = 0L
 
-    private var scanning:
-            Boolean =
-        false
+    private data class PendingCommand(
+        val command: String,
+        var attempts: Int,
+        val expectedAck: String?
+    )
 
+    private val writeQueue = ArrayDeque<String>()
+    private var characteristicWriteInFlight = false
+    private var pendingLogicalCommand: PendingCommand? = null
 
-    // =========================================================================
-    // RECONEXIÓN
-    // =========================================================================
+    // ---------------------------------------------------------------------
+    // Permisos
+    // ---------------------------------------------------------------------
 
-    private var autoReconnectEnabled:
-            Boolean =
-        false
-
-
-    private var reconnectScheduled:
-            Boolean =
-        false
-
-
-    private var closed:
-            Boolean =
-        false
-
-
-    // =========================================================================
-    // MODO DESEADO
-    // =========================================================================
-
-    private var desiredMode:
-            DeviceMode =
-        DeviceMode.USO
-
-
-    // =========================================================================
-    // PERMISOS
-    // =========================================================================
-
-    fun requiredPermissions():
-            Array<String> {
-
-        return if (
-            Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.S
-        ) {
-
+    fun requiredPermissions(): Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT
             )
-
         } else {
-
-            arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-    }
 
-
-    fun hasRequiredPermissions():
-            Boolean {
-
-        return requiredPermissions()
-            .all { permission ->
-
-                ContextCompat.checkSelfPermission(
-                    context,
-                    permission
-                ) ==
-                        PackageManager.PERMISSION_GRANTED
-            }
-    }
-
+    fun hasRequiredPermissions(): Boolean =
+        requiredPermissions().all {
+            ContextCompat.checkSelfPermission(context, it) ==
+                PackageManager.PERMISSION_GRANTED
+        }
 
     fun permissionDenied() {
-
-        updateConnectionState(
-            "Permisos Bluetooth rechazados"
-        )
+        connectionState = "Permisos Bluetooth denegados"
     }
 
-
-    // =========================================================================
-    // ACTUALIZAR ESTADO
-    // =========================================================================
-
-    private fun updateConnectionState(
-        value: String
-    ) {
-
-        mainHandler.post {
-
-            connectionState =
-                value
-        }
-    }
-
-
-    private fun updateConnected(
-        value: Boolean
-    ) {
-
-        mainHandler.post {
-
-            isConnected =
-                value
-        }
-    }
-
-
-    // =========================================================================
-    // LIMPIAR PPG
-    // =========================================================================
-
-    private fun clearPpgSamples() {
-
-        mainHandler.post {
-
-            _ppgSamples.clear()
-        }
-    }
-
-
-    // =========================================================================
-    // MODO DEL DISPOSITIVO
-    // =========================================================================
-
-    fun setDesiredMode(
-        mode: DeviceMode
-    ) {
-
-        desiredMode =
-            mode
-
-
-        // ---------------------------------------------------------------------
-        // En Modo Carga no debe quedar congelada una onda vieja.
-        // ---------------------------------------------------------------------
-
-        if (
-            mode ==
-            DeviceMode.CARGA
-        ) {
-
-            clearPpgSamples()
-        }
-
-
-        if (
-            isConnected
-        ) {
-
-            sendDesiredMode()
-        }
-    }
-
-
-    private fun sendDesiredMode() {
-
-        when (
-            desiredMode
-        ) {
-
-            DeviceMode.USO -> {
-
-                sendCommand(
-                    "MODE:USO"
-                )
-            }
-
-
-            DeviceMode.CARGA -> {
-
-                sendCommand(
-                    "MODE:CARGA"
-                )
-            }
-        }
-    }
-
-
-    // =========================================================================
-    // PAQUETE BLE
-    // =========================================================================
-
-    private fun updatePacket(
-        value: String
-    ) {
-
-        mainHandler.post {
-
-            val packet =
-                value.trim()
-
-
-            if (
-                packet.isBlank()
-            ) {
-
-                return@post
-            }
-
-
-            // =================================================================
-            // STREAM PPG
-            //
-            // Ejemplo:
-            //
-            // S:-123.45
-            //
-            // =================================================================
-
-            if (
-                packet.startsWith(
-                    "S:"
-                )
-            ) {
-
-                val sample =
-                    packet
-                        .substringAfter(
-                            "S:"
-                        )
-                        .toFloatOrNull()
-
-
-                if (
-                    sample != null &&
-                    sample.isFinite()
-                ) {
-
-                    _ppgSamples.add(
-                        sample
-                    )
-
-
-                    // ---------------------------------------------------------
-                    // Mantener solamente la ventana temporal definida.
-                    // ---------------------------------------------------------
-
-                    while (
-                        _ppgSamples.size >
-                        MAX_PPG_SAMPLES
-                    ) {
-
-                        _ppgSamples.removeAt(
-                            0
-                        )
-                    }
-                }
-
-
-                return@post
-            }
-
-
-            // =================================================================
-            // TELEMETRÍA NORMAL
-            //
-            // B:078 A:0 C:4 P:084
-            //
-            // =================================================================
-
-            if (
-                packet.startsWith(
-                    "B:"
-                )
-            ) {
-
-                // -------------------------------------------------------------
-                // Este sí queda como "Último dato recibido".
-                //
-                // Los S: no lo pisan 20 veces por segundo.
-                // -------------------------------------------------------------
-
-                lastPacket =
-                    packet
-
-
-                val packetValid =
-                    parseTelemetryPacket(
-                        packet
-                    )
-
-
-                if (
-                    packetValid
-                ) {
-
-                    onTelemetryReceived
-                        ?.invoke(
-                            bpm,
-                            activityCode,
-                            signalQuality,
-                            batteryPercentage
-                        )
-                }
-
-
-                return@post
-            }
-
-
-            // =================================================================
-            // RESPUESTAS DEL FIRMWARE
-            // =================================================================
-
-            if (
-                packet.startsWith(
-                    "ACK:"
-                ) ||
-                packet.startsWith(
-                    "ERR:"
-                )
-            ) {
-
-                lastPacket =
-                    packet
-
-
-                return@post
-            }
-        }
-    }
-
-
-    // =========================================================================
-    // PARSEO DE TELEMETRÍA
-    //
-    // Formato:
-    //
-    // B:078 A:1 C:4 P:084
-    //
-    // =========================================================================
-
-    private fun parseTelemetryPacket(
-        packet: String
-    ): Boolean {
-
-        return try {
-
-            var parsedBpm:
-                    Int? =
-                null
-
-
-            var parsedActivity:
-                    Int? =
-                null
-
-
-            var parsedQuality:
-                    Int? =
-                null
-
-
-            var parsedBattery:
-                    Int? =
-                null
-
-
-            val fields =
-                packet
-                    .trim()
-                    .split(
-                        Regex(
-                            "\\s+"
-                        )
-                    )
-
-
-            fields.forEach { field ->
-
-                when {
-
-                    // ---------------------------------------------------------
-                    // BPM
-                    // ---------------------------------------------------------
-
-                    field.startsWith(
-                        "B:"
-                    ) -> {
-
-                        parsedBpm =
-                            field
-                                .substringAfter(
-                                    "B:"
-                                )
-                                .toIntOrNull()
-                    }
-
-
-                    // ---------------------------------------------------------
-                    // ACTIVIDAD
-                    // ---------------------------------------------------------
-
-                    field.startsWith(
-                        "A:"
-                    ) -> {
-
-                        parsedActivity =
-                            field
-                                .substringAfter(
-                                    "A:"
-                                )
-                                .toIntOrNull()
-                    }
-
-
-                    // ---------------------------------------------------------
-                    // CALIDAD
-                    // ---------------------------------------------------------
-
-                    field.startsWith(
-                        "C:"
-                    ) -> {
-
-                        parsedQuality =
-                            field
-                                .substringAfter(
-                                    "C:"
-                                )
-                                .toIntOrNull()
-                    }
-
-
-                    // ---------------------------------------------------------
-                    // BATERÍA
-                    // ---------------------------------------------------------
-
-                    field.startsWith(
-                        "P:"
-                    ) -> {
-
-                        parsedBattery =
-                            field
-                                .substringAfter(
-                                    "P:"
-                                )
-                                .toIntOrNull()
-                    }
-                }
-            }
-
-
-            if (
-                parsedBpm == null ||
-                parsedActivity == null ||
-                parsedQuality == null ||
-                parsedBattery == null
-            ) {
-
-                false
-
-            } else {
-
-                bpm =
-                    parsedBpm
-
-
-                activityCode =
-                    parsedActivity
-
-
-                signalQuality =
-                    parsedQuality
-
-
-                batteryPercentage =
-                    parsedBattery
-
-
-                true
-            }
-
-        } catch (
-            _: Exception
-        ) {
-
-            false
-        }
-    }
-
-
-    // =========================================================================
-    // CONEXIÓN INICIAL
-    // =========================================================================
+    // ---------------------------------------------------------------------
+    // API pública
+    // ---------------------------------------------------------------------
 
     fun scanAndConnect() {
+        if (closed) return
+        autoReconnectEnabled = true
 
-        closed =
-            false
+        if (!hasRequiredPermissions()) {
+            permissionDenied()
+            return
+        }
 
+        if (bluetoothAdapter?.isEnabled != true) {
+            connectionState = "Bluetooth desactivado"
+            return
+        }
 
-        autoReconnectEnabled =
-            true
-
+        if (gattConnected || scanning) return
 
         startScan()
     }
 
-
-    // =========================================================================
-    // RUNNABLE DE RECONEXIÓN
-    // =========================================================================
-
-    private val reconnectRunnable:
-            Runnable =
-        Runnable {
-
-            reconnectScheduled =
-                false
-
-
-            if (
-                closed ||
-                !autoReconnectEnabled ||
-                isConnected ||
-                scanning
-            ) {
-
-                return@Runnable
+    /**
+     * B18 sólo admite HELLO:2, GET:STATE y STREAM:0/20.
+     * HELLO es interno y se emite automáticamente tras CCCD.
+     */
+    fun sendCommand(command: String) {
+        when (command) {
+            "GET:STATE" -> enqueueLogicalCommand(command, "ACK:GET:STATE")
+            "STREAM:0" -> {
+                desiredStreamHz = 0
+                enqueueLogicalCommand(command, "ACK:STREAM:0")
             }
-
-
-            startScan()
+            "STREAM:20" -> {
+                desiredStreamHz = 20
+                enqueueLogicalCommand(command, "ACK:STREAM:20")
+            }
+            else -> {
+                lastPacket = "Comando no admitido por B18: $command"
+            }
         }
+    }
 
+    fun close() {
+        closed = true
+        autoReconnectEnabled = false
+        mainHandler.removeCallbacksAndMessages(null)
+        stopScan()
+        clearSessionState()
+        bluetoothGatt?.close()
+        bluetoothGatt = null
+        activeDevice = null
+        onTelemetryReceived = null
+        connectionState = "Desconectado"
+    }
 
-    // =========================================================================
-    // TIMEOUT DE ESCANEO
-    // =========================================================================
+    // ---------------------------------------------------------------------
+    // Scan y conexión
+    // ---------------------------------------------------------------------
 
-    @SuppressLint(
-        "MissingPermission"
-    )
-    private val scanTimeoutRunnable:
-            Runnable =
-        Runnable {
-
-            if (
-                !scanning
-            ) {
-
-                return@Runnable
-            }
-
-
-            try {
-
-                bluetoothAdapter
-                    ?.bluetoothLeScanner
-                    ?.stopScan(
-                        scanCallback
-                    )
-
-            } catch (
-                _: Exception
-            ) {
-            }
-
-
-            scanning =
-                false
-
-
-            updateConnectionState(
-                "PPG-Monitor-S3 no encontrado"
-            )
-
-
-            scheduleReconnect()
-        }
-
-
-    // =========================================================================
-    // ESCANEO
-    // =========================================================================
-
-    @SuppressLint(
-        "MissingPermission"
-    )
+    @SuppressLint("MissingPermission")
     private fun startScan() {
-
-        if (
-            closed
-        ) {
-
+        val scanner = bluetoothAdapter?.bluetoothLeScanner
+        if (scanner == null) {
+            connectionState = "Escáner BLE no disponible"
             return
         }
 
+        scanning = true
+        connectionState = "Buscando PPG-Monitor-S3..."
 
-        if (
-            !hasRequiredPermissions()
-        ) {
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
 
-            updateConnectionState(
-                "Faltan permisos Bluetooth"
-            )
-
-            return
-        }
-
-
-        val adapter =
-            bluetoothAdapter
-
-
-        if (
-            adapter == null
-        ) {
-
-            updateConnectionState(
-                "Bluetooth no disponible"
-            )
-
-            return
-        }
-
-
-        if (
-            !adapter.isEnabled
-        ) {
-
-            updateConnectionState(
-                "Activá Bluetooth"
-            )
-
-            return
-        }
-
-
-        if (
-            isConnected ||
-            scanning
-        ) {
-
-            return
-        }
-
-
-        mainHandler.removeCallbacks(
-            reconnectRunnable
-        )
-
-
-        reconnectScheduled =
-            false
-
-
-        try {
-
-            bluetoothGatt
-                ?.close()
-
-        } catch (
-            _: Exception
-        ) {
-        }
-
-
-        bluetoothGatt =
-            null
-
-
-        rxCharacteristic =
-            null
-
-
-        txCharacteristic =
-            null
-
-
-        val scanner =
-            adapter.bluetoothLeScanner
-
-
-        if (
-            scanner == null
-        ) {
-
-            updateConnectionState(
-                "No se pudo iniciar el escaneo BLE"
-            )
-
-
-            scheduleReconnect()
-
-            return
-        }
-
-
-        val settings:
-                ScanSettings =
-            ScanSettings
-                .Builder()
-                .setScanMode(
-                    ScanSettings
-                        .SCAN_MODE_LOW_LATENCY
-                )
-                .build()
-
-
-        scanning =
-            true
-
-
-        updateConnectionState(
-            "Buscando PPG-Monitor-S3..."
-        )
-
-
-        try {
-
-            scanner.startScan(
-                null,
-                settings,
-                scanCallback
-            )
-
-        } catch (
-            _: Exception
-        ) {
-
-            scanning =
-                false
-
-
-            updateConnectionState(
-                "No se pudo iniciar el escaneo BLE"
-            )
-
-
-            scheduleReconnect()
-
-            return
-        }
-
-
-        mainHandler.removeCallbacks(
-            scanTimeoutRunnable
-        )
-
-
-        mainHandler.postDelayed(
-            scanTimeoutRunnable,
-            SCAN_TIMEOUT_MS
-        )
+        scanner.startScan(null, settings, scanCallback)
+        mainHandler.removeCallbacks(scanTimeoutRunnable)
+        mainHandler.postDelayed(scanTimeoutRunnable, SCAN_TIMEOUT_MS)
     }
 
+    @SuppressLint("MissingPermission")
+    private fun stopScan() {
+        if (!scanning) return
+        bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
+        scanning = false
+        mainHandler.removeCallbacks(scanTimeoutRunnable)
+    }
 
-    // =========================================================================
-    // CALLBACK DE ESCANEO
-    // =========================================================================
+    private val scanTimeoutRunnable = Runnable {
+        if (!scanning) return@Runnable
+        stopScan()
+        connectionState = "No se encontró PPG-Monitor-S3"
+        scheduleReconnect()
+    }
 
-    private val scanCallback:
-            ScanCallback =
-        object :
-            ScanCallback() {
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val serviceMatch =
+                result.scanRecord?.serviceUuids?.any { it.uuid == SERVICE_UUID } == true
 
-            @SuppressLint(
-                "MissingPermission"
-            )
-            override fun onScanResult(
-                callbackType: Int,
-                result: ScanResult
-            ) {
-
-                if (
-                    !scanning
-                ) {
-
-                    return
-                }
-
-
-                val advertisedName =
-                    result
-                        .scanRecord
-                        ?.deviceName
-
-
-                val deviceName =
-                    try {
-
-                        result.device.name
-
-                    } catch (
-                        _: SecurityException
-                    ) {
-
-                        null
-                    }
-
-
-                val detectedName =
-                    advertisedName
-                        ?: deviceName
-
-
-                if (
-                    detectedName !=
-                    DEVICE_NAME
-                ) {
-
-                    return
-                }
-
-
-                scanning =
-                    false
-
-
-                mainHandler.removeCallbacks(
-                    scanTimeoutRunnable
-                )
-
-
-                try {
-
-                    bluetoothAdapter
-                        ?.bluetoothLeScanner
-                        ?.stopScan(
-                            this
-                        )
-
-                } catch (
-                    _: Exception
-                ) {
-                }
-
-
-                updateConnectionState(
-                    "Dispositivo encontrado. Conectando..."
-                )
-
-
-                connectToDevice(
-                    result.device
-                )
+            val nameMatch = try {
+                result.scanRecord?.deviceName == DEVICE_NAME ||
+                    result.device.name == DEVICE_NAME
+            } catch (_: SecurityException) {
+                result.scanRecord?.deviceName == DEVICE_NAME
             }
 
-
-            override fun onScanFailed(
-                errorCode: Int
-            ) {
-
-                scanning =
-                    false
-
-
-                mainHandler.removeCallbacks(
-                    scanTimeoutRunnable
-                )
-
-
-                updateConnectionState(
-                    "Error BLE Scan: $errorCode"
-                )
-
-
-                scheduleReconnect()
+            if (serviceMatch || nameMatch) {
+                stopScan()
+                connectToDevice(result.device)
             }
         }
 
-
-    // =========================================================================
-    // CONEXIÓN
-    // =========================================================================
-
-    @SuppressLint(
-        "MissingPermission"
-    )
-    private fun connectToDevice(
-        device: BluetoothDevice
-    ) {
-
-        if (
-            closed
-        ) {
-
-            return
+        override fun onScanFailed(errorCode: Int) {
+            scanning = false
+            connectionState = "Error de escaneo BLE: $errorCode"
+            scheduleReconnect()
         }
-
-
-        updateConnectionState(
-            "Conectando..."
-        )
-
-
-        bluetoothGatt =
-            device.connectGatt(
-                context,
-                false,
-                gattCallback,
-                BluetoothDevice.TRANSPORT_LE
-            )
     }
 
+    @SuppressLint("MissingPermission")
+    private fun connectToDevice(device: BluetoothDevice) {
+        if (closed) return
 
-    // =========================================================================
-    // PROGRAMAR RECONEXIÓN
-    // =========================================================================
+        connectionState = "Conectando..."
+        activeDevice = device
+
+        bluetoothGatt?.close()
+        bluetoothGatt = device.connectGatt(
+            context,
+            false,
+            gattCallback,
+            BluetoothDevice.TRANSPORT_LE
+        )
+    }
 
     private fun scheduleReconnect() {
+        if (closed || !autoReconnectEnabled || reconnectScheduled) return
 
-        if (
-            closed ||
-            !autoReconnectEnabled ||
-            isConnected ||
-            scanning ||
-            reconnectScheduled
+        reconnectScheduled = true
+        mainHandler.postDelayed({
+            reconnectScheduled = false
+            if (!closed && !gattConnected) {
+                scanAndConnect()
+            }
+        }, RECONNECT_DELAY_MS)
+    }
+
+    // ---------------------------------------------------------------------
+    // GATT callback
+    // ---------------------------------------------------------------------
+
+    private val gattCallback = object : BluetoothGattCallback() {
+
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(
+            gatt: BluetoothGatt,
+            status: Int,
+            newState: Int
         ) {
+            if (gatt !== bluetoothGatt) {
+                gatt.close()
+                return
+            }
 
+            if (status == BluetoothGatt.GATT_SUCCESS &&
+                newState == BluetoothProfile.STATE_CONNECTED
+            ) {
+                gattConnected = true
+                reconnectScheduled = false
+                onMain {
+                    clearLiveValues()
+                    connectionState = "Descubriendo servicios..."
+                }
+                if (!gatt.discoverServices()) {
+                    failCurrentGatt("No se pudo iniciar descubrimiento GATT")
+                }
+                return
+            }
+
+            handleDisconnectedGatt(gatt)
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (gatt !== bluetoothGatt) return
+
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                failCurrentGatt("Error al descubrir servicios: $status")
+                return
+            }
+
+            val service = gatt.getService(SERVICE_UUID)
+            val rx = service?.getCharacteristic(RX_UUID)
+            val tx = service?.getCharacteristic(TX_UUID)
+
+            if (service == null || rx == null || tx == null) {
+                failCurrentGatt("Nordic UART Service B18 no encontrado")
+                return
+            }
+
+            rxCharacteristic = rx
+            txCharacteristic = tx
+
+            onMain { connectionState = "Negociando MTU..." }
+
+            // El funcionamiento no depende del resultado. Si la petición no se
+            // inicia, seguimos directamente con MTU mínimo efectivo.
+            if (!gatt.requestMtu(247)) {
+                onMain { negotiatedMtu = 23 }
+                enableNotifications(gatt)
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (gatt !== bluetoothGatt) return
+
+            onMain {
+                negotiatedMtu =
+                    if (status == BluetoothGatt.GATT_SUCCESS) mtu.coerceAtLeast(23)
+                    else 23
+            }
+            enableNotifications(gatt)
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            if (gatt !== bluetoothGatt || descriptor.uuid != CCCD_UUID) return
+
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                failCurrentGatt("No se pudo habilitar Notify: $status")
+                return
+            }
+
+            subscribed = true
+            onMain { connectionState = "Negociando protocolo B18..." }
+            sendHello()
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            if (gatt !== bluetoothGatt || characteristic.uuid != TX_UUID) return
+            val copy = characteristic.value?.clone() ?: return
+            onMain { consumeNotification(copy) }
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            if (gatt !== bluetoothGatt || characteristic.uuid != TX_UUID) return
+            val copy = value.clone()
+            onMain { consumeNotification(copy) }
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            if (gatt !== bluetoothGatt || characteristic.uuid != RX_UUID) return
+
+            characteristicWriteInFlight = false
+
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                val pending = pendingLogicalCommand
+                if (pending?.command == "HELLO:2") {
+                    retryHelloOrDisconnect()
+                } else if (pending != null && pending.attempts < MAX_COMMAND_ATTEMPTS) {
+                    pending.attempts += 1
+                    writeQueue.addFirst(pending.command)
+                } else if (pending != null) {
+                    onMain { lastPacket = "Fallo de escritura BLE: ${pending.command}" }
+                    pendingLogicalCommand = null
+                }
+            }
+
+            pumpWriteQueue()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun enableNotifications(gatt: BluetoothGatt) {
+        if (gatt !== bluetoothGatt) return
+
+        val tx = txCharacteristic ?: run {
+            failCurrentGatt("TX B18 no disponible")
             return
         }
 
+        onMain { connectionState = "Activando notificaciones..." }
 
-        reconnectScheduled =
-            true
+        if (!gatt.setCharacteristicNotification(tx, true)) {
+            failCurrentGatt("No se pudo activar Notify localmente")
+            return
+        }
 
+        val descriptor = tx.getDescriptor(CCCD_UUID) ?: run {
+            failCurrentGatt("CCCD 0x2902 no encontrado")
+            return
+        }
 
-        updateConnectionState(
-            "Reconectando..."
-        )
+        val value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
 
+        val started =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeDescriptor(descriptor, value) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    descriptor.value = value
+                    gatt.writeDescriptor(descriptor)
+                }
+            }
 
-        mainHandler.postDelayed(
-            reconnectRunnable,
-            RECONNECT_DELAY_MS
-        )
+        if (!started) {
+            failCurrentGatt("No se pudo iniciar escritura CCCD")
+        }
     }
 
+    // ---------------------------------------------------------------------
+    // Negociación y framing
+    // ---------------------------------------------------------------------
 
-    // =========================================================================
-    // LIMPIAR GATT
-    // =========================================================================
+    private fun sendHello() {
+        if (!gattConnected || !subscribed) return
 
-    @SuppressLint(
-        "MissingPermission"
-    )
-    private fun handleDisconnectedGatt(
-        gatt: BluetoothGatt,
-        stateText: String
-    ) {
+        helloAttempts += 1
+        negotiationStarted = false
+        synchronized(assembler) { assembler.reset() }
+        partialStartedAtElapsed = 0L
 
-        updateConnected(
-            false
+        pendingLogicalCommand = PendingCommand(
+            command = "HELLO:2",
+            attempts = helloAttempts,
+            expectedAck = null
+        )
+        writeQueue.addLast("HELLO:2")
+        pumpWriteQueue()
+
+        mainHandler.removeCallbacks(helloTimeoutRunnable)
+        mainHandler.postDelayed(helloTimeoutRunnable, HELLO_TIMEOUT_MS)
+    }
+
+    private val helloTimeoutRunnable = Runnable {
+        if (!negotiated && gattConnected && subscribed) {
+            retryHelloOrDisconnect()
+        }
+    }
+
+    private fun retryHelloOrDisconnect() {
+        pendingLogicalCommand = null
+        writeQueue.clear()
+        characteristicWriteInFlight = false
+        synchronized(assembler) { assembler.reset() }
+        partialStartedAtElapsed = 0L
+
+        if (helloAttempts < MAX_HELLO_ATTEMPTS) {
+            sendHello()
+        } else {
+            failCurrentGatt("B18 no respondió HELLO:2")
+        }
+    }
+
+    private fun consumeNotification(bytes: ByteArray) {
+        if (!gattConnected || !subscribed) return
+
+        // Antes de H se descarta cualquier telemetría legacy completa. La
+        // reconstrucción v2 comienza exclusivamente en una notificación cuyo
+        // primer byte pertenece a "H:2,".
+        if (!negotiated && !negotiationStarted) {
+            val prefix = "H:2,".toByteArray(StandardCharsets.US_ASCII)
+            if (bytes.size < prefix.size ||
+                !prefix.indices.all { bytes[it] == prefix[it] }
+            ) {
+                return
+            }
+            negotiationStarted = true
+            synchronized(assembler) { assembler.reset() }
+        }
+
+        val hadPartial = synchronized(assembler) { assembler.hasPartial }
+        if (!hadPartial && bytes.isNotEmpty()) {
+            partialStartedAtElapsed = SystemClock.elapsedRealtime()
+        }
+
+        val events = synchronized(assembler) { assembler.offer(bytes) }
+
+        if (synchronized(assembler) { assembler.hasPartial }) {
+            mainHandler.removeCallbacks(partialTimeoutRunnable)
+            mainHandler.postDelayed(partialTimeoutRunnable, PARTIAL_TIMEOUT_MS)
+        } else {
+            partialStartedAtElapsed = 0L
+            mainHandler.removeCallbacks(partialTimeoutRunnable)
+        }
+
+        for (event in events) {
+            when (event) {
+                is B18AssemblerEvent.Line -> handleLine(event.value)
+                B18AssemblerEvent.Resync -> {
+                    lastPacket = "Resincronización BLE"
+                    if (!negotiated) retryHelloOrDisconnect()
+                }
+                B18AssemblerEvent.Overflow ->
+                    lastPacket = "Línea BLE descartada: >192 bytes"
+                B18AssemblerEvent.InvalidAscii ->
+                    lastPacket = "Línea BLE descartada: ASCII inválido"
+            }
+        }
+    }
+
+    private val partialTimeoutRunnable = Runnable {
+        val now = SystemClock.elapsedRealtime()
+        if (partialStartedAtElapsed != 0L &&
+            now - partialStartedAtElapsed >= PARTIAL_TIMEOUT_MS
+        ) {
+            synchronized(assembler) { assembler.reset() }
+            partialStartedAtElapsed = 0L
+            lastPacket = "Parcial BLE descartado por timeout"
+            if (!negotiated) retryHelloOrDisconnect()
+        }
+    }
+
+    private fun handleLine(line: String) {
+        lastPacket = line
+
+        val frame = BleProtocol.parse(line) ?: return
+
+        if (!negotiated) {
+            val hello = (frame as? B18Frame.Hello)?.value ?: return
+            if (!validateHello(hello)) {
+                failCurrentGatt("Contrato B18 incompatible")
+                return
+            }
+
+            mainHandler.removeCallbacks(helloTimeoutRunnable)
+            pendingLogicalCommand = null
+            helloAttempts = 0
+            negotiated = true
+            bootId = hello.boot
+            epoch = hello.epoch
+            isConnected = true
+            connectionState = "Conectado - B18 v2"
+
+            // Un epoch nuevo parte con STREAM=20. Sólo hay que restaurar una
+            // preferencia diferente del valor por defecto.
+            if (desiredStreamHz == 0) {
+                enqueueLogicalCommand("STREAM:0", "ACK:STREAM:0")
+            }
+
+            // HELLO ya programa B/O/R/D; no es obligatorio GET:STATE.
+            mainHandler.removeCallbacks(freshnessRunnable)
+            mainHandler.post(freshnessRunnable)
+            return
+        }
+
+        when (frame) {
+            is B18Frame.Hello -> {
+                // HELLO idempotente dentro de la época: actualiza contexto.
+                if (validateHello(frame.value)) {
+                    bootId = frame.value.boot
+                    epoch = frame.value.epoch
+                }
+            }
+
+            is B18Frame.Bpm -> handleBpm(frame.value)
+            is B18Frame.Ppg -> handlePpg(frame.value)
+            is B18Frame.Spo2 -> handleSpo2(frame.value)
+            is B18Frame.Prv -> handlePrv(frame.value)
+            is B18Frame.Diagnostics -> diagnostics = frame.value
+            is B18Frame.Ack -> handleAck("ACK:${frame.command}")
+            is B18Frame.Error -> handleError("ERR:${frame.error}")
+        }
+    }
+
+    private fun validateHello(h: B18Hello): Boolean =
+        h.firmware == "B18" &&
+            h.capabilities == 31 &&
+            h.acquisitionHz == 100 &&
+            h.streamMaxHz == 20 &&
+            h.maxLineBytes == 192 &&
+            h.maxFragmentBytes == 180
+
+    // ---------------------------------------------------------------------
+    // Familias v2
+    // ---------------------------------------------------------------------
+
+    private fun handleBpm(value: B18Bpm) {
+        lastBReceivedElapsed = SystemClock.elapsedRealtime()
+
+        bpm = if (value.visible && value.bpm != null) value.bpm else 0
+        bpmVisible = value.visible && value.bpm != null
+        bpmStateCode = value.state
+        bpmAgeMs = value.ageMs
+        bpmSourceSequence = value.bpmSequence
+
+        activityCode = if (value.activity in 0..2) value.activity else -1
+        signalQuality = value.quality
+        batteryPercentage = value.battery ?: -1
+
+        val boot = bootId
+        val ep = epoch
+        if (
+            boot != null &&
+            ep != null &&
+            value.visible &&
+            value.state == 4 &&
+            value.bpm != null &&
+            value.ageMs != null &&
+            value.ageMs < 5_000L
+        ) {
+            onTelemetryReceived?.invoke(value, boot, ep)
+        }
+    }
+
+    private fun handlePpg(value: B18Ppg) {
+        val now = SystemClock.elapsedRealtime()
+        lastSReceivedElapsed = now
+
+        if (!value.valid || value.value == null || value.sampleTimeMs == null) {
+            clearPpgSamples()
+            lastPpgSequence = value.sequence
+            lastPpgSampleTime = null
+            return
+        }
+
+        val previousSeq = lastPpgSequence
+        val previousTime = lastPpgSampleTime
+
+        val sequenceDiscontinuity =
+            previousSeq != null &&
+                value.sequence != BleProtocol.u32Next(previousSeq)
+
+        val timeDiscontinuity =
+            previousTime != null &&
+                BleProtocol.u32Delta(value.sampleTimeMs, previousTime) > 500L
+
+        if (sequenceDiscontinuity || timeDiscontinuity) {
+            clearPpgSamples()
+        }
+
+        _ppgSamples.add(value.value)
+        while (_ppgSamples.size > MAX_PPG_SAMPLES) {
+            _ppgSamples.removeAt(0)
+        }
+
+        lastPpgSequence = value.sequence
+        lastPpgSampleTime = value.sampleTimeMs
+    }
+
+    private fun handleSpo2(value: B18Spo2) {
+        spo2ReceivedElapsed = SystemClock.elapsedRealtime()
+        spo2Reason = value.reason
+
+        val validNow =
+            value.valid &&
+                value.value != null &&
+                value.ageMs != null &&
+                value.ageMs < SPO2_MAX_AGE_MS
+
+        spo2Valid = validNow
+        spo2 = if (validNow) value.value else null
+    }
+
+    private fun handlePrv(value: B18Prv) {
+        prvReceivedElapsed = SystemClock.elapsedRealtime()
+        prv = if (
+            value.valid &&
+            value.ageMs != null &&
+            value.ageMs < PRV_MAX_AGE_MS
+        ) {
+            value
+        } else {
+            value.copy(
+                valid = false,
+                ppMeanMs = null,
+                rmssdMs = null,
+                sdnnMs = null,
+                pnn50Percent = null,
+                flag = null
+            )
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Caducidad local
+    // ---------------------------------------------------------------------
+
+    private val freshnessRunnable = object : Runnable {
+        override fun run() {
+            if (!negotiated || !gattConnected) return
+
+            val now = SystemClock.elapsedRealtime()
+
+            if (lastBReceivedElapsed != 0L &&
+                now - lastBReceivedElapsed > B_STALE_MS
+            ) {
+                bpm = 0
+                bpmVisible = false
+                bpmStateCode = 0
+                bpmAgeMs = null
+                activityCode = -1
+                signalQuality = 0
+                batteryPercentage = -1
+            }
+
+            if (desiredStreamHz == 20 &&
+                lastSReceivedElapsed != 0L &&
+                now - lastSReceivedElapsed > S_STALE_MS
+            ) {
+                clearPpgSamples()
+                lastPpgSampleTime = null
+                lastPpgSequence = null
+            }
+
+            val currentSpo2 = spo2
+            if (currentSpo2 != null && spo2ReceivedElapsed != 0L) {
+                // age del último O + tiempo local transcurrido.
+                // Al no retener el objeto O, la vigencia se limita además a
+                // 2.5 s desde recepción, condición conservadora.
+                if (now - spo2ReceivedElapsed >= SPO2_MAX_AGE_MS) {
+                    spo2 = null
+                    spo2Valid = false
+                    spo2Reason = 5
+                }
+            }
+
+            val currentPrv = prv
+            if (currentPrv?.valid == true && prvReceivedElapsed != 0L) {
+                val receivedAge = currentPrv.ageMs ?: PRV_MAX_AGE_MS
+                if (receivedAge + (now - prvReceivedElapsed) >= PRV_MAX_AGE_MS) {
+                    prv = currentPrv.copy(
+                        valid = false,
+                        ppMeanMs = null,
+                        rmssdMs = null,
+                        sdnnMs = null,
+                        pnn50Percent = null,
+                        flag = null
+                    )
+                }
+            }
+
+            mainHandler.postDelayed(this, 250L)
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Escrituras serializadas
+    // ---------------------------------------------------------------------
+
+    private fun enqueueLogicalCommand(command: String, expectedAck: String?) {
+        if (!negotiated || !gattConnected || !subscribed) {
+            lastPacket = "Comando no enviado: protocolo B18 no negociado"
+            return
+        }
+
+        if (pendingLogicalCommand != null) {
+            lastPacket = "Comando pendiente; espere respuesta B18"
+            return
+        }
+
+        pendingLogicalCommand = PendingCommand(
+            command = command,
+            attempts = 1,
+            expectedAck = expectedAck
         )
 
+        writeQueue.addLast(command)
+        pumpWriteQueue()
+        armCommandTimeout()
+    }
 
-        updateConnectionState(
-            stateText
-        )
+    private fun handleAck(fullAck: String) {
+        val pending = pendingLogicalCommand ?: return
+        if (pending.expectedAck == fullAck) {
+            pendingLogicalCommand = null
+            mainHandler.removeCallbacks(commandTimeoutRunnable)
+        }
+    }
 
+    private fun handleError(fullError: String) {
+        if (pendingLogicalCommand != null) {
+            pendingLogicalCommand = null
+            mainHandler.removeCallbacks(commandTimeoutRunnable)
+        }
+        lastPacket = fullError
+    }
 
-        // ---------------------------------------------------------------------
-        // Si se pierde BLE, no queremos dejar una onda vieja congelada.
-        // ---------------------------------------------------------------------
+    private fun armCommandTimeout() {
+        mainHandler.removeCallbacks(commandTimeoutRunnable)
+        mainHandler.postDelayed(commandTimeoutRunnable, COMMAND_TIMEOUT_MS)
+    }
+
+    private val commandTimeoutRunnable = Runnable {
+        val pending = pendingLogicalCommand ?: return@Runnable
+
+        if (pending.attempts < MAX_COMMAND_ATTEMPTS) {
+            pending.attempts += 1
+            writeQueue.addLast(pending.command)
+            pumpWriteQueue()
+            armCommandTimeout()
+        } else {
+            lastPacket = "Timeout de comando: ${pending.command}"
+            pendingLogicalCommand = null
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun pumpWriteQueue() {
+        if (characteristicWriteInFlight) return
+
+        val gatt = bluetoothGatt ?: return
+        val rx = rxCharacteristic ?: return
+        val command = writeQueue.pollFirst() ?: return
+
+        val data = command.toByteArray(StandardCharsets.US_ASCII)
+
+        if (data.isEmpty() || data.size > 31) {
+            lastPacket = "Comando inválido por longitud"
+            return
+        }
+
+        characteristicWriteInFlight = true
+
+        val started =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(
+                    rx,
+                    data,
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                ) == BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    rx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    rx.value = data
+                    gatt.writeCharacteristic(rx)
+                }
+            }
+
+        if (!started) {
+            characteristicWriteInFlight = false
+            val pending = pendingLogicalCommand
+            if (pending?.command == "HELLO:2") {
+                retryHelloOrDisconnect()
+            } else if (pending != null && pending.attempts < MAX_COMMAND_ATTEMPTS) {
+                pending.attempts += 1
+                writeQueue.addFirst(pending.command)
+                armCommandTimeout()
+            } else {
+                pendingLogicalCommand = null
+                lastPacket = "No se pudo iniciar escritura BLE"
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Limpieza / desconexión
+    // ---------------------------------------------------------------------
+
+    private fun clearPpgSamples() {
+        _ppgSamples.clear()
+    }
+
+    private fun clearLiveValues() {
+        isConnected = false
+        negotiated = false
+        subscribed = false
+        negotiationStarted = false
+
+        bootId = null
+        epoch = null
+
+        bpm = 0
+        bpmVisible = false
+        bpmStateCode = 0
+        bpmAgeMs = null
+        bpmSourceSequence = null
+
+        activityCode = -1
+        signalQuality = 0
+        batteryPercentage = -1
+
+        spo2 = null
+        spo2Valid = false
+        spo2Reason = 1
+        prv = null
+        diagnostics = null
+
+        lastBReceivedElapsed = 0L
+        lastSReceivedElapsed = 0L
+        spo2ReceivedElapsed = 0L
+        prvReceivedElapsed = 0L
+        lastPpgSequence = null
+        lastPpgSampleTime = null
 
         clearPpgSamples()
+    }
 
+    private fun clearSessionState() {
+        mainHandler.removeCallbacks(helloTimeoutRunnable)
+        mainHandler.removeCallbacks(commandTimeoutRunnable)
+        mainHandler.removeCallbacks(partialTimeoutRunnable)
+        mainHandler.removeCallbacks(freshnessRunnable)
 
-        rxCharacteristic =
-            null
+        synchronized(assembler) { assembler.reset() }
+        partialStartedAtElapsed = 0L
 
+        writeQueue.clear()
+        characteristicWriteInFlight = false
+        pendingLogicalCommand = null
+        helloAttempts = 0
 
-        txCharacteristic =
-            null
+        gattConnected = false
+        rxCharacteristic = null
+        txCharacteristic = null
 
+        clearLiveValues()
+    }
 
-        try {
-
+    @SuppressLint("MissingPermission")
+    private fun handleDisconnectedGatt(gatt: BluetoothGatt) {
+        if (gatt !== bluetoothGatt) {
             gatt.close()
-
-        } catch (
-            _: Exception
-        ) {
+            return
         }
 
+        clearSessionState()
+        gatt.close()
+        bluetoothGatt = null
 
-        if (
-            bluetoothGatt ===
-            gatt
-        ) {
-
-            bluetoothGatt =
-                null
+        onMain {
+            connectionState = "Desconectado"
         }
-
 
         scheduleReconnect()
     }
 
-
-    // =========================================================================
-    // CALLBACK GATT
-    // =========================================================================
-
-    private val gattCallback:
-            BluetoothGattCallback =
-        object :
-            BluetoothGattCallback() {
-
-
-            // =================================================================
-            // CAMBIO DE CONEXIÓN
-            // =================================================================
-
-            @SuppressLint(
-                "MissingPermission"
-            )
-            override fun onConnectionStateChange(
-                gatt: BluetoothGatt,
-                status: Int,
-                newState: Int
-            ) {
-
-                if (
-                    status ==
-                    BluetoothGatt.GATT_SUCCESS &&
-                    newState ==
-                    BluetoothProfile.STATE_CONNECTED
-                ) {
-
-                    updateConnectionState(
-                        "Descubriendo servicios..."
-                    )
-
-
-                    val started:
-                            Boolean =
-                        try {
-
-                            gatt.discoverServices()
-
-                        } catch (
-                            _: Exception
-                        ) {
-
-                            false
-                        }
-
-
-                    if (
-                        !started
-                    ) {
-
-                        handleDisconnectedGatt(
-                            gatt,
-                            "Error iniciando descubrimiento GATT"
-                        )
-                    }
-                }
-
-
-                else if (
-                    newState ==
-                    BluetoothProfile.STATE_DISCONNECTED
-                ) {
-
-                    handleDisconnectedGatt(
-                        gatt,
-                        "Desconectado"
-                    )
-                }
-
-
-                else if (
-                    status !=
-                    BluetoothGatt.GATT_SUCCESS
-                ) {
-
-                    handleDisconnectedGatt(
-                        gatt,
-                        "Error GATT: $status"
-                    )
-                }
-            }
-
-
-            // =================================================================
-            // SERVICIOS
-            // =================================================================
-
-            @SuppressLint(
-                "MissingPermission"
-            )
-            override fun onServicesDiscovered(
-                gatt: BluetoothGatt,
-                status: Int
-            ) {
-
-                if (
-                    status !=
-                    BluetoothGatt.GATT_SUCCESS
-                ) {
-
-                    handleDisconnectedGatt(
-                        gatt,
-                        "Error descubriendo servicios: $status"
-                    )
-
-                    return
-                }
-
-
-                val service =
-                    gatt.getService(
-                        SERVICE_UUID
-                    )
-
-
-                if (
-                    service == null
-                ) {
-
-                    handleDisconnectedGatt(
-                        gatt,
-                        "Servicio BLE no encontrado"
-                    )
-
-                    return
-                }
-
-
-                rxCharacteristic =
-                    service.getCharacteristic(
-                        RX_UUID
-                    )
-
-
-                txCharacteristic =
-                    service.getCharacteristic(
-                        TX_UUID
-                    )
-
-
-                val tx =
-                    txCharacteristic
-
-
-                if (
-                    rxCharacteristic == null ||
-                    tx == null
-                ) {
-
-                    handleDisconnectedGatt(
-                        gatt,
-                        "RX/TX no encontradas"
-                    )
-
-                    return
-                }
-
-
-                val notifyEnabled =
-                    try {
-
-                        gatt.setCharacteristicNotification(
-                            tx,
-                            true
-                        )
-
-                    } catch (
-                        _: Exception
-                    ) {
-
-                        false
-                    }
-
-
-                if (
-                    !notifyEnabled
-                ) {
-
-                    handleDisconnectedGatt(
-                        gatt,
-                        "No se pudo activar Notify"
-                    )
-
-                    return
-                }
-
-
-                val descriptor =
-                    tx.getDescriptor(
-                        CCCD_UUID
-                    )
-
-
-                if (
-                    descriptor == null
-                ) {
-
-                    handleDisconnectedGatt(
-                        gatt,
-                        "Descriptor 0x2902 no encontrado"
-                    )
-
-                    return
-                }
-
-
-                if (
-                    Build.VERSION.SDK_INT >=
-                    Build.VERSION_CODES.TIRAMISU
-                ) {
-
-                    val result =
-                        gatt.writeDescriptor(
-                            descriptor,
-                            BluetoothGattDescriptor
-                                .ENABLE_NOTIFICATION_VALUE
-                        )
-
-
-                    if (
-                        result !=
-                        BluetoothStatusCodes.SUCCESS
-                    ) {
-
-                        handleDisconnectedGatt(
-                            gatt,
-                            "Error iniciando Notify: $result"
-                        )
-
-                        return
-                    }
-
-                } else {
-
-                    @Suppress(
-                        "DEPRECATION"
-                    )
-                    descriptor.value =
-                        BluetoothGattDescriptor
-                            .ENABLE_NOTIFICATION_VALUE
-
-
-                    @Suppress(
-                        "DEPRECATION"
-                    )
-                    val ok =
-                        gatt.writeDescriptor(
-                            descriptor
-                        )
-
-
-                    if (
-                        !ok
-                    ) {
-
-                        handleDisconnectedGatt(
-                            gatt,
-                            "Error iniciando Notify"
-                        )
-
-                        return
-                    }
-                }
-
-
-                updateConnectionState(
-                    "Activando notificaciones..."
-                )
-            }
-
-
-            // =================================================================
-            // NOTIFY ACTIVADO
-            // =================================================================
-
-            @SuppressLint(
-                "MissingPermission"
-            )
-            override fun onDescriptorWrite(
-                gatt: BluetoothGatt,
-                descriptor: BluetoothGattDescriptor,
-                status: Int
-            ) {
-
-                if (
-                    descriptor.uuid ==
-                    CCCD_UUID &&
-                    status ==
-                    BluetoothGatt.GATT_SUCCESS
-                ) {
-
-                    updateConnected(
-                        true
-                    )
-
-
-                    updateConnectionState(
-                        "Conectado"
-                    )
-
-
-                    // ---------------------------------------------------------
-                    // Reenviar automáticamente MODE:USO o MODE:CARGA
-                    // después de una reconexión.
-                    // ---------------------------------------------------------
-
-                    mainHandler.postDelayed(
-                        {
-
-                            if (
-                                !closed &&
-                                isConnected
-                            ) {
-
-                                sendDesiredMode()
-                            }
-
-                        },
-                        MODE_RESEND_DELAY_MS
-                    )
-
-                } else {
-
-                    handleDisconnectedGatt(
-                        gatt,
-                        "Error activando Notify: $status"
-                    )
-                }
-            }
-
-
-            // =================================================================
-            // RECEPCIÓN MODERNA
-            // =================================================================
-
-            override fun onCharacteristicChanged(
-                gatt: BluetoothGatt,
-                characteristic:
-                BluetoothGattCharacteristic,
-                value: ByteArray
-            ) {
-
-                if (
-                    characteristic.uuid ==
-                    TX_UUID
-                ) {
-
-                    val packet =
-                        value.toString(
-                            Charsets.UTF_8
-                        )
-
-
-                    updatePacket(
-                        packet
-                    )
-                }
-            }
-
-
-            // =================================================================
-            // RECEPCIÓN LEGACY
-            // =================================================================
-
-            @Suppress(
-                "DEPRECATION"
-            )
-            override fun onCharacteristicChanged(
-                gatt: BluetoothGatt,
-                characteristic:
-                BluetoothGattCharacteristic
-            ) {
-
-                if (
-                    characteristic.uuid ==
-                    TX_UUID
-                ) {
-
-                    val packet =
-                        characteristic
-                            .value
-                            ?.toString(
-                                Charsets.UTF_8
-                            )
-                            ?: return
-
-
-                    updatePacket(
-                        packet
-                    )
-                }
-            }
+    @SuppressLint("MissingPermission")
+    private fun failCurrentGatt(message: String) {
+        onMain {
+            connectionState = message
+            isConnected = false
         }
 
-
-    // =========================================================================
-    // ENVIAR COMANDO
-    // =========================================================================
-
-    @SuppressLint(
-        "MissingPermission"
-    )
-    fun sendCommand(
-        command: String
-    ) {
-
-        if (
-            !isConnected
-        ) {
-
-            return
-        }
-
-
-        val gatt =
-            bluetoothGatt
-
-
-        val rx =
-            rxCharacteristic
-
-
-        if (
-            gatt == null ||
-            rx == null
-        ) {
-
-            return
-        }
-
-
-        val data =
-            command.toByteArray(
-                Charsets.UTF_8
-            )
-
-
-        // =====================================================================
-        // ANDROID 13+
-        // =====================================================================
-
-        if (
-            Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.TIRAMISU
-        ) {
-
-            val result =
-                gatt.writeCharacteristic(
-                    rx,
-                    data,
-                    BluetoothGattCharacteristic
-                        .WRITE_TYPE_DEFAULT
-                )
-
-
-            if (
-                result !=
-                BluetoothStatusCodes.SUCCESS
-            ) {
-
-                updateConnectionState(
-                    "Error enviando comando: $result"
-                )
+        val gatt = bluetoothGatt
+        if (gatt != null) {
+            try {
+                gatt.disconnect()
+            } catch (_: SecurityException) {
+                handleDisconnectedGatt(gatt)
             }
-
         } else {
-
-            // =================================================================
-            // ANDROID 12 O INFERIOR
-            // =================================================================
-
-            @Suppress(
-                "DEPRECATION"
-            )
-            rx.writeType =
-                BluetoothGattCharacteristic
-                    .WRITE_TYPE_DEFAULT
-
-
-            @Suppress(
-                "DEPRECATION"
-            )
-            rx.value =
-                data
-
-
-            @Suppress(
-                "DEPRECATION"
-            )
-            val ok =
-                gatt.writeCharacteristic(
-                    rx
-                )
-
-
-            if (
-                !ok
-            ) {
-
-                updateConnectionState(
-                    "Error enviando comando"
-                )
-            }
+            scheduleReconnect()
         }
     }
 
-
-    // =========================================================================
-    // CERRAR BLE
-    // =========================================================================
-
-    @SuppressLint(
-        "MissingPermission"
-    )
-    fun close() {
-
-        closed =
-            true
-
-
-        autoReconnectEnabled =
-            false
-
-
-        reconnectScheduled =
-            false
-
-
-        mainHandler.removeCallbacks(
-            reconnectRunnable
-        )
-
-
-        mainHandler.removeCallbacks(
-            scanTimeoutRunnable
-        )
-
-
-        clearPpgSamples()
-
-
-        try {
-
-            bluetoothAdapter
-                ?.bluetoothLeScanner
-                ?.stopScan(
-                    scanCallback
-                )
-
-        } catch (
-            _: Exception
-        ) {
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            mainHandler.post(block)
         }
-
-
-        scanning =
-            false
-
-
-        try {
-
-            bluetoothGatt
-                ?.disconnect()
-
-        } catch (
-            _: Exception
-        ) {
-        }
-
-
-        try {
-
-            bluetoothGatt
-                ?.close()
-
-        } catch (
-            _: Exception
-        ) {
-        }
-
-
-        bluetoothGatt =
-            null
-
-
-        rxCharacteristic =
-            null
-
-
-        txCharacteristic =
-            null
-
-
-        onTelemetryReceived =
-            null
-
-
-        updateConnected(
-            false
-        )
     }
 }
