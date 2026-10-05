@@ -221,10 +221,10 @@ private fun ExploratoryVitalsCard(
                 text = if (validPrv == null) {
                     "No disponible"
                 } else {
-                    "PP medio ${String.format("%.1f", validPrv.ppMeanMs)} ms · " +
-                        "RMSSD ${String.format("%.1f", validPrv.rmssdMs)} ms\n" +
-                        "SDNN ${String.format("%.1f", validPrv.sdnnMs)} ms · " +
-                        "pNN50 ${String.format("%.1f", validPrv.pnn50Percent)} %"
+                    "PP medio ${String.format("%.1f", validPrv.ppMeanMs!!)} ms · " +
+                        "RMSSD ${String.format("%.1f", validPrv.rmssdMs!!)} ms\n" +
+                        "SDNN ${String.format("%.1f", validPrv.sdnnMs!!)} ms · " +
+                        "pNN50 ${String.format("%.1f", validPrv.pnn50Percent!!)} %"
                 },
                 fontSize = 13.sp,
                 color = TextSecondary
