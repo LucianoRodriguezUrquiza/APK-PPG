@@ -134,7 +134,7 @@ dependencies {
     // Standard float32 TensorFlow Lite runtime. The model was converted with
     // TFLITE_BUILTINS only; no SELECT_TF_OPS / Flex dependency is required.
     implementation(
-        "org.tensorflow:tensorflow-lite:2.17.0"
+        "com.google.ai.edge.litert:litert:1.0.1"
     )
 
 
