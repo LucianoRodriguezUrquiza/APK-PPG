@@ -638,15 +638,17 @@ class BleManager(
                         enablePaNotifications(gatt)
                     } else {
                         paSubscribed = false
-                        onMain {
-                            bloodPressureState =
-                                BloodPressureUiState(
-                                    status = BloodPressureStatus.RECHAZADA,
-                                    message = "Firmware sin transporte PA B19"
-                                )
-                            connectionState = "Negociando protocolo B18..."
+
+                        if (
+                            bloodPressureState.status !=
+                                BloodPressureStatus.RECHAZADA
+                        ) {
+                            setPaRejected(
+                                "PA B19: UUID ...0004 no descubierta"
+                            )
                         }
-                        sendHello()
+
+                        proceedToHello()
                     }
                 }
 
