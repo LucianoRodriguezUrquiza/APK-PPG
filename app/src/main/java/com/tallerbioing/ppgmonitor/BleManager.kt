@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -52,6 +53,7 @@ class BleManager(
 
     companion object {
         private const val DEVICE_NAME = "PPG-Monitor-S3"
+        private const val TAG = "B18BleManager"
         private const val RECONNECT_DELAY_MS = 2_000L
         private const val SCAN_TIMEOUT_MS = 10_000L
         private const val HELLO_TIMEOUT_MS = 2_000L
@@ -376,6 +378,8 @@ class BleManager(
         connectionState = "Conectando..."
         activeDevice = device
 
+        Log.i(TAG, "Intentando connectGatt a ${device.address}")
+
         bluetoothGatt?.close()
         bluetoothGatt = device.connectGatt(
             context,
@@ -409,7 +413,27 @@ class BleManager(
             status: Int,
             newState: Int
         ) {
-            if (gatt !== bluetoothGatt) {
+            Log.i(
+                TAG,
+                "onConnectionStateChange status=$status newState=$newState " +
+                    "device=${gatt.device.address}"
+            )
+
+            /*
+             * IMPORTANTE:
+             *
+             * No rechazamos el primer callback sólo porque gatt !== bluetoothGatt.
+             * En algunos stacks Android (incluido MIUI/Xiaomi) el callback inicial
+             * puede llegar antes de que connectGatt() haya terminado de devolver
+             * el objeto y antes, por tanto, de que la asignación a bluetoothGatt
+             * quede visible. El código anterior podía cerrar una conexión válida
+             * inmediatamente después de iniciarla.
+             */
+            val expectedAddress = activeDevice?.address
+            if (expectedAddress != null &&
+                gatt.device.address != expectedAddress
+            ) {
+                Log.w(TAG, "Callback GATT de otro dispositivo; se descarta")
                 gatt.close()
                 return
             }
@@ -417,19 +441,46 @@ class BleManager(
             if (status == BluetoothGatt.GATT_SUCCESS &&
                 newState == BluetoothProfile.STATE_CONNECTED
             ) {
+                // Adoptar explícitamente el GATT que realmente notificó conexión.
+                bluetoothGatt = gatt
                 gattConnected = true
                 reconnectScheduled = false
+
                 onMain {
                     clearLiveValues()
                     connectionState = "Descubriendo servicios..."
                 }
+
                 if (!gatt.discoverServices()) {
                     failCurrentGatt("No se pudo iniciar descubrimiento GATT")
                 }
                 return
             }
 
-            handleDisconnectedGatt(gatt)
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                if (bluetoothGatt == null || bluetoothGatt === gatt) {
+                    bluetoothGatt = gatt
+                    handleDisconnectedGatt(
+                        gatt,
+                        "Error GATT: $status"
+                    )
+                } else {
+                    gatt.close()
+                }
+                return
+            }
+
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                if (bluetoothGatt == null || bluetoothGatt === gatt) {
+                    bluetoothGatt = gatt
+                    handleDisconnectedGatt(
+                        gatt,
+                        "Desconectado"
+                    )
+                } else {
+                    gatt.close()
+                }
+            }
         }
 
         @SuppressLint("MissingPermission")
@@ -1098,18 +1149,26 @@ class BleManager(
     }
 
     @SuppressLint("MissingPermission")
-    private fun handleDisconnectedGatt(gatt: BluetoothGatt) {
-        if (gatt !== bluetoothGatt) {
+    private fun handleDisconnectedGatt(
+        gatt: BluetoothGatt,
+        reason: String
+    ) {
+        if (bluetoothGatt != null && gatt !== bluetoothGatt) {
             gatt.close()
             return
         }
 
+        Log.w(TAG, "Cerrando GATT: $reason")
+
         clearSessionState()
         gatt.close()
-        bluetoothGatt = null
+
+        if (bluetoothGatt === gatt) {
+            bluetoothGatt = null
+        }
 
         onMain {
-            connectionState = "Desconectado"
+            connectionState = reason
         }
 
         scheduleReconnect()
@@ -1127,7 +1186,10 @@ class BleManager(
             try {
                 gatt.disconnect()
             } catch (_: SecurityException) {
-                handleDisconnectedGatt(gatt)
+                handleDisconnectedGatt(
+                    gatt,
+                    message
+                )
             }
         } else {
             scheduleReconnect()
