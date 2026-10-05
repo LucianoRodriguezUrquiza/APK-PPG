@@ -55,6 +55,7 @@ class BleManager(
         private const val RECONNECT_DELAY_MS = 2_000L
         private const val SCAN_TIMEOUT_MS = 10_000L
         private const val HELLO_TIMEOUT_MS = 2_000L
+        private const val MTU_TIMEOUT_MS = 1_000L
         private const val COMMAND_TIMEOUT_MS = 2_000L
         private const val PARTIAL_TIMEOUT_MS = B18_PARTIAL_TIMEOUT_MS
         private const val B_STALE_MS = 2_000L
@@ -194,6 +195,7 @@ class BleManager(
     private var gattConnected = false
     private var subscribed = false
     private var negotiated = false
+    private var mtuPending = false
     private var activeDevice: BluetoothDevice? = null
 
     private val assembler = B18LineAssembler()
@@ -209,6 +211,7 @@ class BleManager(
     private var lastPpgSampleTime: Long? = null
 
     private var spo2ReceivedElapsed = 0L
+    private var spo2AgeAtReceive: Long? = null
     private var prvReceivedElapsed = 0L
 
     private data class PendingCommand(
@@ -453,15 +456,23 @@ class BleManager(
             onMain { connectionState = "Negociando MTU..." }
 
             // El funcionamiento no depende del resultado. Si la petición no se
-            // inicia, seguimos directamente con MTU mínimo efectivo.
+            // inicia o el callback no llega, seguimos con MTU 23.
+            mtuPending = true
             if (!gatt.requestMtu(247)) {
+                mtuPending = false
                 onMain { negotiatedMtu = 23 }
                 enableNotifications(gatt)
+            } else {
+                mainHandler.removeCallbacks(mtuTimeoutRunnable)
+                mainHandler.postDelayed(mtuTimeoutRunnable, MTU_TIMEOUT_MS)
             }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            if (gatt !== bluetoothGatt) return
+            if (gatt !== bluetoothGatt || !mtuPending) return
+
+            mtuPending = false
+            mainHandler.removeCallbacks(mtuTimeoutRunnable)
 
             onMain {
                 negotiatedMtu =
@@ -533,6 +544,16 @@ class BleManager(
             pumpWriteQueue()
         }
     }
+
+    private val mtuTimeoutRunnable = Runnable {
+        val gatt = bluetoothGatt ?: return@Runnable
+        if (!mtuPending || !gattConnected) return@Runnable
+
+        mtuPending = false
+        negotiatedMtu = 23
+        enableNotifications(gatt)
+    }
+
 
     @SuppressLint("MissingPermission")
     private fun enableNotifications(gatt: BluetoothGatt) {
@@ -806,6 +827,7 @@ class BleManager(
 
     private fun handleSpo2(value: B18Spo2) {
         spo2ReceivedElapsed = SystemClock.elapsedRealtime()
+        spo2AgeAtReceive = value.ageMs
         spo2Reason = value.reason
 
         val validNow =
@@ -871,10 +893,8 @@ class BleManager(
 
             val currentSpo2 = spo2
             if (currentSpo2 != null && spo2ReceivedElapsed != 0L) {
-                // age del último O + tiempo local transcurrido.
-                // Al no retener el objeto O, la vigencia se limita además a
-                // 2.5 s desde recepción, condición conservadora.
-                if (now - spo2ReceivedElapsed >= SPO2_MAX_AGE_MS) {
+                val receivedAge = spo2AgeAtReceive ?: SPO2_MAX_AGE_MS
+                if (receivedAge + (now - spo2ReceivedElapsed) >= SPO2_MAX_AGE_MS) {
                     spo2 = null
                     spo2Valid = false
                     spo2Reason = 5
@@ -1046,6 +1066,7 @@ class BleManager(
         lastBReceivedElapsed = 0L
         lastSReceivedElapsed = 0L
         spo2ReceivedElapsed = 0L
+        spo2AgeAtReceive = null
         prvReceivedElapsed = 0L
         lastPpgSequence = null
         lastPpgSampleTime = null
@@ -1055,6 +1076,7 @@ class BleManager(
 
     private fun clearSessionState() {
         mainHandler.removeCallbacks(helloTimeoutRunnable)
+        mainHandler.removeCallbacks(mtuTimeoutRunnable)
         mainHandler.removeCallbacks(commandTimeoutRunnable)
         mainHandler.removeCallbacks(partialTimeoutRunnable)
         mainHandler.removeCallbacks(freshnessRunnable)
@@ -1068,6 +1090,7 @@ class BleManager(
         helloAttempts = 0
 
         gattConnected = false
+        mtuPending = false
         rxCharacteristic = null
         txCharacteristic = null
 
