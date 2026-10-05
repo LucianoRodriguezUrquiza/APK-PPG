@@ -348,10 +348,6 @@ private fun ExploratoryVitalsCard(
             }
 
             bloodPressure.message
-                ?.takeIf {
-                    bloodPressure.status ==
-                        BloodPressureStatus.RECHAZADA
-                }
                 ?.let {
                     Text(
                         text = it,
