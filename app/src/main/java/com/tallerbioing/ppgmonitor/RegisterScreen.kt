@@ -1202,7 +1202,7 @@ fun PpgRealtimeCard(
                         samples.size <
                                 2 ->
 
-                            "Sin stream PPG. En Modo Carga la medición permanece pausada."
+                            "Sin stream PPG válido."
 
 
                         else ->
