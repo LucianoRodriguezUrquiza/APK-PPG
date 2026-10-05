@@ -22,7 +22,7 @@ import urllib.request
 
 import h5py
 import numpy as np
-from scipy.signal import butter, filtfilt, resample_poly
+from scipy.signal import butter, filtfilt, firwin, lfilter_zi, resample_poly
 from scipy.special import expit
 import tensorflow as tf
 
@@ -35,6 +35,8 @@ BUILD_DIR = ROOT / "build" / "bp"
 H5_PATH = BUILD_DIR / "lstm_ppg_nonmixed.h5"
 TFLITE_PATH = ROOT / "app" / "src" / "main" / "assets" / "lstm_ppg_nonmixed.tflite"
 STAGES_PATH = ROOT / "app" / "src" / "test" / "resources" / "bp_golden_stages.json"
+STAGES_TEXT_TEST_PATH = ROOT / "app" / "src" / "test" / "resources" / "bp_golden_stages.txt"
+STAGES_TEXT_ANDROID_PATH = ROOT / "app" / "src" / "androidTest" / "assets" / "bp_golden_stages.txt"
 REPORT_PATH = ROOT / "validation" / "bp" / "tflite_validation_report.json"
 
 EXPECTED_ARCH = [
@@ -472,6 +474,8 @@ def validate_tflite(oracle, golden, mapping):
 
 def write_stage_goldens(oracle, golden):
     STAGES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STAGES_TEXT_ANDROID_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     payload = {
         "generator": "tools/bp/convert_and_validate.py",
         "model_md5": MODEL_MD5,
@@ -479,6 +483,11 @@ def write_stage_goldens(oracle, golden):
         "target_rate_hz": 125,
         "windows": [],
     }
+
+    text_lines = [
+        "# BP19 golden stages; pipe-delimited; generated from canonical Python oracle",
+        "# FORMAT: SEQ|id|oracle_sbp|oracle_dbp then RAW/RESAMPLED/FILTERED/NORMALIZED|values...",
+    ]
 
     for item in golden["windows"]:
         sbp, dbp, resampled, filtered, normalized = oracle.predict(item["raw"])
@@ -492,7 +501,16 @@ def write_stage_goldens(oracle, golden):
             "oracle_dbp": dbp,
         })
 
+        text_lines.append(f"SEQ|{item['seq']}|{sbp:.17g}|{dbp:.17g}")
+        text_lines.append("RAW|" + "|".join(str(int(v)) for v in item["raw"]))
+        text_lines.append("RESAMPLED|" + "|".join(f"{float(v):.17g}" for v in resampled))
+        text_lines.append("FILTERED|" + "|".join(f"{float(v):.17g}" for v in filtered))
+        text_lines.append("NORMALIZED|" + "|".join(f"{float(v):.9g}" for v in normalized))
+
     STAGES_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    text = "\n".join(text_lines) + "\n"
+    STAGES_TEXT_TEST_PATH.write_text(text, encoding="utf-8")
+    STAGES_TEXT_ANDROID_PATH.write_text(text, encoding="utf-8")
 
 
 def main():
@@ -527,6 +545,29 @@ def main():
         "max_abs_oracle_vs_historical_dbp": max(abs(r["delta_oracle_vs_historical_dbp"]) for r in tflite_rows),
         "select_tf_ops_used": False,
         "acceptance_mmHg": 0.01,
+        "preprocessing_reference": {
+            "scipy_version": __import__("scipy").__version__,
+            "resample_up": 5,
+            "resample_down": 4,
+            "resample_fir": [
+                float(v) for v in np.concatenate((
+                    np.zeros(2),
+                    firwin(101, 0.2, window=("kaiser", 5.0)) * 5
+                ))
+            ],
+            "resample_pre_remove": 13,
+            "butter_b": [float(v) for v in butter(4, [0.5, 8], btype="bandpass", fs=125)[0]],
+            "butter_a": [float(v) for v in butter(4, [0.5, 8], btype="bandpass", fs=125)[1]],
+            "filtfilt_zi": [
+                float(v)
+                for v in lfilter_zi(
+                    *butter(4, [0.5, 8], btype="bandpass", fs=125)
+                )
+            ],
+            "filtfilt_padtype": "odd",
+            "filtfilt_padlen": 27,
+            "normalization_ddof": 0,
+        },
     }
     REPORT_PATH.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
