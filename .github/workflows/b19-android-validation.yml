@@ -8,6 +8,8 @@ on:
       - "app/build.gradle.kts"
       - "gradle/**"
       - "app/src/main/java/com/tallerbioing/ppgmonitor/bp/**"
+      - "app/src/main/java/com/tallerbioing/ppgmonitor/BleManager.kt"
+      - "app/src/main/java/com/tallerbioing/ppgmonitor/SummaryScreen.kt"
       - "app/src/main/assets/lstm_ppg_nonmixed.tflite"
       - "app/src/test/java/com/tallerbioing/ppgmonitor/bp/**"
       - "app/src/test/resources/bp_golden_stages.txt"
@@ -66,3 +68,4 @@ jobs:
         if: always()
         run: |
           grep -R "BP_ANDROID_TFLITE_MAX" app/build/outputs/androidTest-results app/build/reports/androidTests 2>/dev/null || true
+          grep -R "BP_TRANSPORT_PIPELINE_MAX" app/build/outputs/androidTest-results app/build/reports/androidTests 2>/dev/null || true
