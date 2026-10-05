@@ -488,6 +488,63 @@ class BleManager(
                 return
             }
 
+            if (
+                paGattCacheReconnectPending &&
+                newState == BluetoothProfile.STATE_DISCONNECTED &&
+                (bluetoothGatt == null || bluetoothGatt === gatt)
+            ) {
+                paGattCacheReconnectPending = false
+                bluetoothGatt = gatt
+
+                val device =
+                    activeDevice ?: gatt.device
+
+                val refreshResult =
+                    refreshGattCache(gatt)
+
+                paGattCacheRefreshDetail =
+                    refreshResult.second
+
+                Log.w(
+                    TAG,
+                    "PA B19: refresh GATT cache -> " +
+                        "${refreshResult.second}; reconectando una única vez"
+                )
+
+                clearSessionState()
+                gatt.close()
+
+                if (bluetoothGatt === gatt) {
+                    bluetoothGatt = null
+                }
+
+                onMain {
+                    bloodPressureState =
+                        BloodPressureUiState(
+                            status =
+                                BloodPressureStatus.SENSANDO,
+                            message =
+                                "PA B19: caché GATT actualizada; reconectando (1/1)..."
+                        )
+                    connectionState =
+                        "Reconectando tras limpiar caché GATT..."
+                }
+
+                mainHandler.postDelayed(
+                    {
+                        if (
+                            !closed &&
+                            !gattConnected
+                        ) {
+                            connectToDevice(device)
+                        }
+                    },
+                    600L
+                )
+
+                return
+            }
+
             if (status == BluetoothGatt.GATT_SUCCESS &&
                 newState == BluetoothProfile.STATE_CONNECTED
             ) {
@@ -521,62 +578,6 @@ class BleManager(
             }
 
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                if (
-                    paGattCacheReconnectPending &&
-                    (bluetoothGatt == null || bluetoothGatt === gatt)
-                ) {
-                    paGattCacheReconnectPending = false
-                    bluetoothGatt = gatt
-
-                    val device =
-                        activeDevice ?: gatt.device
-
-                    val refreshResult =
-                        refreshGattCache(gatt)
-
-                    paGattCacheRefreshDetail =
-                        refreshResult.second
-
-                    Log.w(
-                        TAG,
-                        "PA B19: refresh GATT cache -> " +
-                            "${refreshResult.second}; reconectando una única vez"
-                    )
-
-                    clearSessionState()
-                    gatt.close()
-
-                    if (bluetoothGatt === gatt) {
-                        bluetoothGatt = null
-                    }
-
-                    onMain {
-                        bloodPressureState =
-                            BloodPressureUiState(
-                                status =
-                                    BloodPressureStatus.SENSANDO,
-                                message =
-                                    "PA B19: caché GATT actualizada; reconectando (1/1)..."
-                            )
-                        connectionState =
-                            "Reconectando tras limpiar caché GATT..."
-                    }
-
-                    mainHandler.postDelayed(
-                        {
-                            if (
-                                !closed &&
-                                !gattConnected
-                            ) {
-                                connectToDevice(device)
-                            }
-                        },
-                        600L
-                    )
-
-                    return
-                }
-
                 if (bluetoothGatt == null || bluetoothGatt === gatt) {
                     bluetoothGatt = gatt
                     handleDisconnectedGatt(
