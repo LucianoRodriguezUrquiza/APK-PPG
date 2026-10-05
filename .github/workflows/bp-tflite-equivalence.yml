@@ -44,7 +44,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add             app/src/main/assets/lstm_ppg_nonmixed.tflite             app/src/test/resources/bp_golden_stages.json             validation/bp/tflite_validation_report.json
+          git add app/src/main/assets/lstm_ppg_nonmixed.tflite app/src/test/resources/bp_golden_stages.json app/src/test/resources/bp_golden_stages.txt app/src/androidTest/assets/bp_golden_stages.txt validation/bp/tflite_validation_report.json
           if git diff --cached --quiet; then
             echo "Generated outputs already up to date."
           else
