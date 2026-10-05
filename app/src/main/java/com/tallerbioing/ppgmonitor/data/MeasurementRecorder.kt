@@ -1,164 +1,102 @@
 package com.tallerbioing.ppgmonitor.data
 
 import android.content.Context
+import com.tallerbioing.ppgmonitor.B18Bpm
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-
-// ============================================================================
-// REGISTRADOR AUTOMÁTICO DE MEDICIONES
-// ============================================================================
-//
-// Recibe los valores ya interpretados desde BleManager.
-//
-// Guarda una medición cada 5 segundos cuando:
-//
-// - BPM > 0
-// - existe señal óptica
-// - actividad válida
-// - batería válida
-//
-// ============================================================================
-
+/**
+ * Registrador histórico conservador para B18.
+ *
+ * Room no cambia: se siguen guardando fecha/hora, BPM, actividad, calidad y
+ * batería. La información de boot/epoch/N se usa sólo en memoria para decidir
+ * si una promoción de BPM es realmente nueva.
+ */
 class MeasurementRecorder(
     context: Context
 ) {
-
-    // ------------------------------------------------------------------------
-    // DAO
-    // ------------------------------------------------------------------------
 
     private val measurementDao =
         AppDatabase
             .getDatabase(context)
             .measurementDao()
 
-
-    // ------------------------------------------------------------------------
-    // Coroutine para operaciones de base de datos
-    // ------------------------------------------------------------------------
-
     private val scope =
         CoroutineScope(
-            SupervisorJob() +
-                    Dispatchers.IO
+            SupervisorJob() + Dispatchers.IO
         )
 
+    private val saveIntervalMs = 5_000L
+    private var lastSavedTimestamp = 0L
 
-    // ------------------------------------------------------------------------
-    // Intervalo entre registros
-    //
-    // 5 segundos = 5000 ms
-    // ------------------------------------------------------------------------
-
-    private val saveIntervalMs =
-        5000L
-
-
-    private var lastSavedTimestamp =
-        0L
-
-
-    // ========================================================================
-    // RECIBIR TELEMETRÍA
-    // ========================================================================
+    /**
+     * Se conserva entre reconexiones mientras el proceso Android siga vivo.
+     * Si boot no cambia, un N repetido no vuelve a registrarse aunque cambie
+     * epoch. Si N cambia, se considera una nueva promoción posible.
+     */
+    private var lastRecordedBoot: String? = null
+    private var lastRecordedBpmSequence: Long? = null
 
     fun recordTelemetry(
-
-        bpm: Int,
-
-        activityCode: Int,
-
-        signalQuality: Int,
-
-        batteryPercentage: Int
+        telemetry: B18Bpm,
+        boot: String,
+        epoch: Long
     ) {
+        @Suppress("UNUSED_VARIABLE")
+        val transportEpoch = epoch
 
-        val now =
-            System.currentTimeMillis()
+        val bpm = telemetry.bpm ?: return
+        val battery = telemetry.battery ?: return
+        val age = telemetry.ageMs ?: return
 
-
-        // --------------------------------------------------------------------
-        // Validar medición
-        // --------------------------------------------------------------------
+        // Contrato B18 para una nueva actualización apta para el recorder.
+        val sourceIsNew =
+            lastRecordedBoot != boot ||
+                lastRecordedBpmSequence != telemetry.bpmSequence
 
         val validMeasurement =
+            telemetry.visible &&
+                telemetry.state == 4 &&
+                age < 5_000L &&
+                sourceIsNew &&
+                bpm > 0 &&
+                telemetry.activity in 0..2 &&
+                telemetry.quality in setOf(2, 3, 4) &&
+                battery in 0..100
 
-            bpm > 0 &&
+        if (!validMeasurement) return
 
-                    signalQuality > 0 &&
+        val now = System.currentTimeMillis()
 
-                    activityCode in 0..2 &&
+        // Se marca N como visto antes del rate-limit para impedir que una
+        // retransmisión del mismo N sea guardada más tarde como si fuera nueva.
+        lastRecordedBoot = boot
+        lastRecordedBpmSequence = telemetry.bpmSequence
 
-                    batteryPercentage in 0..100
-
-
-        if (!validMeasurement) {
-
+        if (now - lastSavedTimestamp < saveIntervalMs) {
             return
         }
 
-
-        // --------------------------------------------------------------------
-        // Evitar guardar paquetes BLE cada 500 ms
-        //
-        // Solo guardamos una muestra cada 5 segundos.
-        // --------------------------------------------------------------------
-
-        if (
-            now - lastSavedTimestamp <
-            saveIntervalMs
-        ) {
-
-            return
-        }
-
-
-        lastSavedTimestamp =
-            now
-
-
-        // --------------------------------------------------------------------
-        // Insertar en Room
-        // --------------------------------------------------------------------
+        lastSavedTimestamp = now
 
         val measurement =
             MeasurementEntity(
-
                 timestamp = now,
-
                 bpm = bpm,
-
-                activityCode =
-                    activityCode,
-
-                signalQuality =
-                    signalQuality,
-
-                batteryPercentage =
-                    batteryPercentage
+                activityCode = telemetry.activity,
+                signalQuality = telemetry.quality,
+                batteryPercentage = battery
             )
 
-
         scope.launch {
-
-            measurementDao
-                .insertMeasurement(
-                    measurement
-                )
+            measurementDao.insertMeasurement(measurement)
         }
     }
 
-
-    // ========================================================================
-    // CERRAR
-    // ========================================================================
-
     fun close() {
-
         scope.cancel()
     }
 }
