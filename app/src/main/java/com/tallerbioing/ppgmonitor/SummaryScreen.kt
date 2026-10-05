@@ -53,9 +53,7 @@ import java.time.LocalDate
 
 @Composable
 fun SummaryScreen(
-    bleManager: BleManager,
-    deviceMode: DeviceMode,
-    onModeChange: (DeviceMode) -> Unit
+    bleManager: BleManager
 ) {
 
     Column(
@@ -70,83 +68,226 @@ fun SummaryScreen(
             )
     ) {
 
-        // --------------------------------------------------------------------
-        // SEMANA ACTUAL
-        // --------------------------------------------------------------------
-
         WeekDashboard()
 
-
-        Spacer(
-            modifier = Modifier.height(14.dp)
-        )
-
-
-        // --------------------------------------------------------------------
-        // FRECUENCIA CARDÍACA
-        // --------------------------------------------------------------------
+        Spacer(modifier = Modifier.height(14.dp))
 
         HeartRateCard(
             bpm = bleManager.bpm
         )
 
+        Spacer(modifier = Modifier.height(10.dp))
 
-        Spacer(
-            modifier = Modifier.height(12.dp)
+        B18StatusCard(
+            state = bleManager.bpmStateText,
+            ageMs = bleManager.bpmAgeMs,
+            quality = bleManager.signalQualityText,
+            connected = bleManager.isConnected
         )
 
-
-        // --------------------------------------------------------------------
-        // ACTIVIDAD
-        // --------------------------------------------------------------------
+        Spacer(modifier = Modifier.height(12.dp))
 
         ActivityCard(
-            activityCode =
-                bleManager.activityCode
+            activityCode = bleManager.activityCode
         )
 
+        Spacer(modifier = Modifier.height(12.dp))
 
-        Spacer(
-            modifier = Modifier.height(12.dp)
+        BatteryCard(
+            battery = bleManager.batteryPercentage,
+            modifier = Modifier.fillMaxWidth()
         )
 
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // --------------------------------------------------------------------
-        // BATERÍA + MODO
-        // --------------------------------------------------------------------
+        ExploratoryVitalsCard(
+            spo2 = if (bleManager.spo2Valid) bleManager.spo2 else null,
+            prv = bleManager.prv,
+            connected = bleManager.isConnected
+        )
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
+        Spacer(modifier = Modifier.height(20.dp))
+    }
+}
 
-            horizontalArrangement =
-                Arrangement.spacedBy(12.dp)
+
+@Composable
+private fun B18StatusCard(
+    state: String,
+    ageMs: Long?,
+    quality: String,
+    connected: Boolean
+) {
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = White
+        ),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = 1.dp
+        )
+    ) {
+
+        Column(
+            modifier = Modifier.padding(16.dp)
         ) {
 
-            BatteryCard(
-                battery =
-                    bleManager.batteryPercentage,
-
-                modifier =
-                    Modifier.weight(1f)
+            Text(
+                text = "ESTADO DE LA MEDICIÓN",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextSecondary
             )
 
+            Spacer(modifier = Modifier.height(7.dp))
 
-            ModeCard(
-                currentMode =
-                    deviceMode,
+            Text(
+                text = if (connected) state else "Sin conexión BLE",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
 
-                onModeChange =
-                    onModeChange,
+            Spacer(modifier = Modifier.height(5.dp))
 
-                modifier =
-                    Modifier.weight(1f)
+            Text(
+                text = "Calidad: $quality",
+                fontSize = 13.sp,
+                color = TextSecondary
+            )
+
+            Text(
+                text = "Edad BPM: " +
+                    (ageMs?.let { "${it} ms" } ?: "--"),
+                fontSize = 13.sp,
+                color = TextSecondary
             )
         }
+    }
+}
 
 
-        Spacer(
-            modifier = Modifier.height(20.dp)
+@Composable
+private fun ExploratoryVitalsCard(
+    spo2: Float?,
+    prv: B18Prv?,
+    connected: Boolean
+) {
+
+    val validPrv = prv?.takeIf { it.valid }
+
+    val prvStatus =
+        when {
+            !connected ->
+                "PRV: Sin conexión"
+
+            validPrv != null ->
+                "PRV: Disponible"
+
+            prv == null ->
+                "PRV: Esperando datos..."
+
+            else ->
+                "PRV: Sensando..."
+        }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = PurpleSoft
+        ),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = 2.dp
         )
+    ) {
+
+        Column(
+            modifier = Modifier.padding(18.dp)
+        ) {
+
+            Text(
+                text = "VARIABLES EXPLORATORIAS",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextSecondary
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "SpO₂: " +
+                    (spo2?.let { String.format("%.1f %%", it) } ?: "--"),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "PRV (PPG, no ECG)",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+
+            Text(
+                text = prvStatus,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (validPrv != null) Green else TextSecondary
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = if (validPrv == null) {
+                    if (prv == null) {
+                        "La ESP32 todavía no entregó una ventana PRV evaluable."
+                    } else {
+                        "Ventana diagnóstica: " +
+                            "${prv.spanMs / 1000} s · " +
+                            "NN ${prv.nn}/${prv.total} · " +
+                            "limpia ${prv.cleanPercent} %"
+                    }
+                } else {
+                    "PP medio ${String.format("%.1f", validPrv.ppMeanMs!!)} ms · " +
+                        "RMSSD ${String.format("%.1f", validPrv.rmssdMs!!)} ms\n" +
+                        "SDNN ${String.format("%.1f", validPrv.sdnnMs!!)} ms · " +
+                        "pNN50 ${String.format("%.1f", validPrv.pnn50Percent!!)} %"
+                },
+                fontSize = 13.sp,
+                color = TextSecondary
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "Presión arterial: pendiente de integración BLE",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextSecondary
+            )
+
+            Text(
+                text = "B18 no transmite todavía valores sistólico/diastólico en mmHg.",
+                fontSize = 12.sp,
+                color = TextSecondary
+            )
+
+            if (validPrv?.flag == true) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Patrón irregular exploratorio detectado",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Pink
+                )
+            }
+        }
     }
 }
 
@@ -846,176 +987,6 @@ fun BatteryIcon(
                             bottomEnd = 3.dp
                         )
                 )
-        )
-    }
-}
-
-
-// ============================================================================
-// TARJETA MODO DEL DISPOSITIVO
-// ============================================================================
-
-@Composable
-fun ModeCard(
-    currentMode: DeviceMode,
-    onModeChange: (DeviceMode) -> Unit,
-    modifier: Modifier = Modifier
-) {
-
-    Card(
-        modifier =
-            modifier,
-
-        shape =
-            RoundedCornerShape(24.dp),
-
-        colors =
-            CardDefaults.cardColors(
-                containerColor =
-                    PurpleSoft
-            ),
-
-        elevation =
-            CardDefaults.cardElevation(
-                defaultElevation = 2.dp
-            )
-    ) {
-
-        Column(
-            modifier =
-                Modifier.padding(14.dp)
-        ) {
-
-            Text(
-                text = "MODO",
-
-                fontSize = 12.sp,
-
-                fontWeight =
-                    FontWeight.Bold,
-
-                color =
-                    TextSecondary
-            )
-
-
-            Spacer(
-                modifier =
-                    Modifier.height(10.dp)
-            )
-
-
-            ModeButton(
-                text =
-                    "Modo Uso",
-
-                selected =
-                    currentMode ==
-                            DeviceMode.USO,
-
-                onClick = {
-
-                    onModeChange(
-                        DeviceMode.USO
-                    )
-                }
-            )
-
-
-            Spacer(
-                modifier =
-                    Modifier.height(7.dp)
-            )
-
-
-            ModeButton(
-                text =
-                    "Modo Carga",
-
-                selected =
-                    currentMode ==
-                            DeviceMode.CARGA,
-
-                onClick = {
-
-                    onModeChange(
-                        DeviceMode.CARGA
-                    )
-                }
-            )
-        }
-    }
-}
-
-
-// ============================================================================
-// BOTÓN DE MODO
-// ============================================================================
-
-@Composable
-fun ModeButton(
-    text: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(
-                RoundedCornerShape(
-                    11.dp
-                )
-            ),
-
-        onClick = onClick,
-
-        color =
-
-            if (selected) {
-
-                Purple
-
-            } else {
-
-                White.copy(
-                    alpha = 0.72f
-                )
-            },
-
-        shape =
-            RoundedCornerShape(
-                11.dp
-            )
-    ) {
-
-        Text(
-            text = text,
-
-            modifier =
-                Modifier.padding(
-                    vertical = 9.dp,
-                    horizontal = 5.dp
-                ),
-
-            textAlign =
-                TextAlign.Center,
-
-            fontSize = 12.sp,
-
-            fontWeight =
-                FontWeight.Bold,
-
-            color =
-
-                if (selected) {
-
-                    White
-
-                } else {
-
-                    PurpleDark
-                }
         )
     }
 }

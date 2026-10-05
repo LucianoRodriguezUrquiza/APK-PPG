@@ -97,6 +97,7 @@ fun ConnectivityScreen(
         internalState.contains("buscando") ||
                 internalState.contains("conectando") ||
                 internalState.contains("descubriendo") ||
+                internalState.contains("negociando") ||
                 internalState.contains("activando")
 
 
@@ -434,114 +435,81 @@ fun ConnectivityScreen(
 
 
         // ====================================================================
-        // CONTROL OLED
+        // PROTOCOLO B18 / DIAGNÓSTICO TÉCNICO
         // ====================================================================
 
         Text(
-            text =
-                "Pantalla OLED",
-
-            fontSize =
-                18.sp,
-
-            fontWeight =
-                FontWeight.Bold,
-
-            color =
-                TextPrimary
+            text = "Protocolo B18",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
         )
-
 
         Spacer(
-            modifier =
-                Modifier.height(
-                    10.dp
-                )
+            modifier = Modifier.height(10.dp)
         )
 
-
-        Row(
-            modifier =
-                Modifier.fillMaxWidth(),
-
-            horizontalArrangement =
-                Arrangement.spacedBy(
-                    8.dp
-                )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            color = White
         ) {
 
-            OledButton(
-                text =
-                    "BPM",
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
 
-                enabled =
-                    bleManager.isConnected,
+                Text(
+                    text =
+                        if (bleManager.isConnected) {
+                            "BLE v2 negociado"
+                        } else {
+                            "Esperando negociación BLE v2"
+                        },
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
 
-                modifier =
-                    Modifier.weight(
-                        1f
-                    ),
+                Spacer(modifier = Modifier.height(6.dp))
 
-                onClick = {
+                Text(
+                    text = "MTU efectivo: ${bleManager.negotiatedMtu}",
+                    fontSize = 12.sp,
+                    color = TextSecondary
+                )
 
-                    bleManager
-                        .sendCommand(
-                            "SCREEN:0"
-                        )
+                Text(
+                    text = "Boot: ${bleManager.bootId ?: "--"}",
+                    fontSize = 12.sp,
+                    color = TextSecondary
+                )
+
+                Text(
+                    text = "Epoch: ${bleManager.epoch?.toString() ?: "--"}",
+                    fontSize = 12.sp,
+                    color = TextSecondary
+                )
+
+                val d = bleManager.diagnostics
+
+                if (d != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text =
+                            "RAM libre ${d.freeBytes} B · mínimo ${d.minFreeBytes} B\n" +
+                                "Stack mín. ${d.stackMinBytes} B · TX errores ${d.txErrors}\n" +
+                                "Stream omitido ${d.streamSkipped} · snapshots ${d.snapshotSkipped}\n" +
+                                "Comandos descartados ${d.commandDrops} · formato ${d.formatErrors}",
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
                 }
-            )
-
-
-            OledButton(
-                text =
-                    "ACT.",
-
-                enabled =
-                    bleManager.isConnected,
-
-                modifier =
-                    Modifier.weight(
-                        1f
-                    ),
-
-                onClick = {
-
-                    bleManager
-                        .sendCommand(
-                            "SCREEN:1"
-                        )
-                }
-            )
-
-
-            OledButton(
-                text =
-                    "RESUMEN",
-
-                enabled =
-                    bleManager.isConnected,
-
-                modifier =
-                    Modifier.weight(
-                        1f
-                    ),
-
-                onClick = {
-
-                    bleManager
-                        .sendCommand(
-                            "SCREEN:2"
-                        )
-                }
-            )
+            }
         }
 
-
         Spacer(
-            modifier =
-                Modifier.height(
-                    28.dp
-                )
+            modifier = Modifier.height(28.dp)
         )
 
 
