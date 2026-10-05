@@ -542,5 +542,5 @@ def main():
 if __name__ == "__main__":
     # Keep numerical behavior deterministic and avoid excessive CI threading.
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-    np.seterr(all="raise")
+    np.seterr(divide="raise", over="raise", invalid="raise", under="ignore")
     main()
