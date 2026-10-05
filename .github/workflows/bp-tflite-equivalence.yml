@@ -49,5 +49,7 @@ jobs:
             echo "Generated outputs already up to date."
           else
             git commit -m "Add validated BP TFLite model and golden stages [skip ci]"
+            git fetch origin b19-blood-pressure
+            git rebase origin/b19-blood-pressure
             git push origin HEAD:b19-blood-pressure
           fi
