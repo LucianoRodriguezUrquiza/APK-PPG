@@ -243,6 +243,8 @@ object BleProtocol {
         val battery = batteryToken.value
         val age = ageToken.value
 
+        if (visible != (bpm != null)) return null
+
         return B18Bpm(
             bpm = bpm,
             activity = activity,
@@ -311,6 +313,7 @@ object BleProtocol {
         val flag = nullableBool(p[15]) ?: return null
 
         if (valid && listOf(pp.value, rmssd.value, sdnn.value, pnn50.value).any { it == null }) return null
+        if (valid && flag.value == null) return null
         if (!valid && listOf(pp.value, rmssd.value, sdnn.value, pnn50.value).any { it != null }) return null
         if (!valid && flag.value != null) return null
 
