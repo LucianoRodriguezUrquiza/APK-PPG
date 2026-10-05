@@ -80,6 +80,7 @@ class BleManager(
         private const val MAX_HELLO_ATTEMPTS = 3
         private const val MAX_COMMAND_ATTEMPTS = 2
         private const val MAX_PPG_SAMPLES = 240
+        private const val PA_SETUP_RETRY_DELAY_MS = 300L
 
         private val SERVICE_UUID =
             UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -216,6 +217,7 @@ class BleManager(
     private var gattConnected = false
     private var subscribed = false
     private var paSubscribed = false
+    private var paSetupRetryUsed = false
     private var negotiated = false
     private var mtuPending = false
     private var activeDevice: BluetoothDevice? = null
@@ -551,19 +553,54 @@ class BleManager(
             txCharacteristic = tx
             paCharacteristic = pa
 
-            onMain { connectionState = "Negociando MTU..." }
+            val paCccd =
+                pa?.getDescriptor(CCCD_UUID)
 
-            // El funcionamiento no depende del resultado. Si la petición no se
-            // inicia o el callback no llega, seguimos con MTU 23.
-            mtuPending = true
-            if (!gatt.requestMtu(247)) {
-                mtuPending = false
-                onMain { negotiatedMtu = 23 }
-                enableNotifications(gatt)
+            Log.i(
+                TAG,
+                "PA B19 discovery: uuid0004=${pa != null} " +
+                    "cccd=${paCccd != null} retryUsed=$paSetupRetryUsed"
+            )
+
+            if (pa == null) {
+                if (
+                    retryPaDiscoveryOnce(
+                        gatt,
+                        "UUID ...0004 no descubierta"
+                    )
+                ) {
+                    return
+                }
+
+                setPaRejected(
+                    "PA B19: UUID ...0004 no fue descubierta tras 1 reintento"
+                )
+            } else if (paCccd == null) {
+                if (
+                    retryPaDiscoveryOnce(
+                        gatt,
+                        "UUID ...0004 presente pero CCCD 0x2902 ausente"
+                    )
+                ) {
+                    return
+                }
+
+                setPaRejected(
+                    "PA B19: UUID ...0004 existe, pero no tiene CCCD 0x2902 tras 1 reintento"
+                )
             } else {
-                mainHandler.removeCallbacks(mtuTimeoutRunnable)
-                mainHandler.postDelayed(mtuTimeoutRunnable, MTU_TIMEOUT_MS)
+                onMain {
+                    bloodPressureState =
+                        BloodPressureUiState(
+                            status =
+                                BloodPressureStatus.SENSANDO,
+                            message =
+                                "PA B19: UUID ...0004 y CCCD descubiertos; habilitando Notify"
+                        )
+                }
             }
+
+            continueAfterServiceDiscovery(gatt)
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
@@ -614,27 +651,46 @@ class BleManager(
                 }
 
                 PA_TX_UUID -> {
-                    paSubscribed =
-                        status == BluetoothGatt.GATT_SUCCESS
+                    Log.i(
+                        TAG,
+                        "PA B19 CCCD write status=$status retryUsed=$paSetupRetryUsed"
+                    )
+
+                    if (
+                        status !=
+                            BluetoothGatt.GATT_SUCCESS
+                    ) {
+                        if (
+                            retryPaSubscriptionOnce(
+                                gatt,
+                                "escritura CCCD falló (status=$status)"
+                            )
+                        ) {
+                            return
+                        }
+
+                        paSubscribed = false
+                        setPaRejected(
+                            "PA B19: UUID ...0004 y CCCD existen, pero falló habilitar Notify " +
+                                "(status=$status) tras 1 reintento"
+                        )
+                        proceedToHello()
+                        return
+                    }
+
+                    paSubscribed = true
 
                     onMain {
                         bloodPressureState =
-                            if (paSubscribed) {
-                                BloodPressureUiState(
-                                    status = BloodPressureStatus.SENSANDO
-                                )
-                            } else {
-                                BloodPressureUiState(
-                                    status = BloodPressureStatus.RECHAZADA,
-                                    message = "No se pudo habilitar Notify PA"
-                                )
-                            }
-
-                        connectionState =
-                            "Negociando protocolo B18..."
+                            BloodPressureUiState(
+                                status =
+                                    BloodPressureStatus.SENSANDO,
+                                message =
+                                    "PA disponible: UUID ...0004 + CCCD + Notify habilitados"
+                            )
                     }
 
-                    sendHello()
+                    proceedToHello()
                 }
             }
         }
@@ -717,6 +773,163 @@ class BleManager(
 
 
     @SuppressLint("MissingPermission")
+    private fun continueAfterServiceDiscovery(
+        gatt: BluetoothGatt
+    ) {
+        if (gatt !== bluetoothGatt) return
+
+        onMain {
+            connectionState =
+                "Negociando MTU..."
+        }
+
+        // B18 behavior is preserved. PA discovery is optional and never blocks
+        // the validated NUS path after its single controlled retry.
+        mtuPending = true
+
+        if (!gatt.requestMtu(247)) {
+            mtuPending = false
+            onMain {
+                negotiatedMtu = 23
+            }
+            enableNotifications(gatt)
+        } else {
+            mainHandler.removeCallbacks(
+                mtuTimeoutRunnable
+            )
+            mainHandler.postDelayed(
+                mtuTimeoutRunnable,
+                MTU_TIMEOUT_MS
+            )
+        }
+    }
+
+
+    @SuppressLint("MissingPermission")
+    private fun retryPaDiscoveryOnce(
+        gatt: BluetoothGatt,
+        reason: String
+    ): Boolean {
+        if (paSetupRetryUsed) {
+            return false
+        }
+
+        paSetupRetryUsed = true
+
+        Log.w(
+            TAG,
+            "PA B19: $reason; reintentando discoverServices una única vez"
+        )
+
+        onMain {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.SENSANDO,
+                    message =
+                        "PA B19: $reason. Reintentando descubrimiento (1/1)..."
+                )
+            connectionState =
+                "Reintentando descubrimiento PA..."
+        }
+
+        mainHandler.postDelayed(
+            {
+                if (
+                    gatt !== bluetoothGatt ||
+                    !gattConnected
+                ) {
+                    return@postDelayed
+                }
+
+                if (!gatt.discoverServices()) {
+                    setPaRejected(
+                        "PA B19: el reintento de descubrimiento GATT no pudo iniciarse"
+                    )
+                    continueAfterServiceDiscovery(
+                        gatt
+                    )
+                }
+            },
+            PA_SETUP_RETRY_DELAY_MS
+        )
+
+        return true
+    }
+
+
+    private fun setPaRejected(
+        message: String
+    ) {
+        Log.w(TAG, message)
+
+        onMain {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.RECHAZADA,
+                    message = message
+                )
+        }
+    }
+
+
+    private fun proceedToHello() {
+        onMain {
+            connectionState =
+                "Negociando protocolo B18..."
+        }
+        sendHello()
+    }
+
+
+    @SuppressLint("MissingPermission")
+    private fun retryPaSubscriptionOnce(
+        gatt: BluetoothGatt,
+        reason: String
+    ): Boolean {
+        if (paSetupRetryUsed) {
+            return false
+        }
+
+        paSetupRetryUsed = true
+
+        Log.w(
+            TAG,
+            "PA B19: $reason; reintentando suscripción una única vez"
+        )
+
+        onMain {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.SENSANDO,
+                    message =
+                        "PA B19: $reason. Reintentando Notify (1/1)..."
+                )
+        }
+
+        mainHandler.postDelayed(
+            {
+                if (
+                    gatt !== bluetoothGatt ||
+                    !gattConnected
+                ) {
+                    return@postDelayed
+                }
+
+                enablePaNotifications(
+                    gatt
+                )
+            },
+            PA_SETUP_RETRY_DELAY_MS
+        )
+
+        return true
+    }
+
+
+    @SuppressLint("MissingPermission")
     private fun enableNotifications(gatt: BluetoothGatt) {
         if (gatt !== bluetoothGatt) return
 
@@ -765,33 +978,13 @@ class BleManager(
 
         val pa =
             paCharacteristic
-                ?: run {
-                    paSubscribed = false
-                    onMain {
-                        connectionState =
-                            "Negociando protocolo B18..."
-                    }
-                    sendHello()
-                    return
-                }
 
-        onMain {
-            connectionState =
-                "Activando transporte PA..."
-        }
-
-        if (!gatt.setCharacteristicNotification(pa, true)) {
+        if (pa == null) {
             paSubscribed = false
-            onMain {
-                bloodPressureState =
-                    BloodPressureUiState(
-                        status = BloodPressureStatus.RECHAZADA,
-                        message = "No se pudo activar Notify PA"
-                    )
-                connectionState =
-                    "Negociando protocolo B18..."
-            }
-            sendHello()
+            setPaRejected(
+                "PA B19: UUID ...0004 no fue descubierta tras 1 reintento"
+            )
+            proceedToHello()
             return
         }
 
@@ -800,16 +993,55 @@ class BleManager(
 
         if (descriptor == null) {
             paSubscribed = false
-            onMain {
-                bloodPressureState =
-                    BloodPressureUiState(
-                        status = BloodPressureStatus.RECHAZADA,
-                        message = "CCCD PA no encontrado"
-                    )
-                connectionState =
-                    "Negociando protocolo B18..."
+
+            if (
+                retryPaDiscoveryOnce(
+                    gatt,
+                    "UUID ...0004 presente pero CCCD 0x2902 ausente"
+                )
+            ) {
+                return
             }
-            sendHello()
+
+            setPaRejected(
+                "PA B19: UUID ...0004 existe, pero no tiene CCCD 0x2902 tras 1 reintento"
+            )
+            proceedToHello()
+            return
+        }
+
+        onMain {
+            connectionState =
+                "Activando transporte PA..."
+        }
+
+        Log.i(
+            TAG,
+            "PA B19: UUID ...0004 + CCCD presentes; setCharacteristicNotification()"
+        )
+
+        if (
+            !gatt.setCharacteristicNotification(
+                pa,
+                true
+            )
+        ) {
+            paSubscribed = false
+
+            if (
+                retryPaSubscriptionOnce(
+                    gatt,
+                    "setCharacteristicNotification() devolvió false"
+                )
+            ) {
+                return
+            }
+
+            setPaRejected(
+                "PA B19: UUID ...0004 + CCCD presentes, pero la activación local de Notify " +
+                    "falló tras 1 reintento"
+            )
+            proceedToHello()
             return
         }
 
@@ -839,16 +1071,21 @@ class BleManager(
 
         if (!started) {
             paSubscribed = false
-            onMain {
-                bloodPressureState =
-                    BloodPressureUiState(
-                        status = BloodPressureStatus.RECHAZADA,
-                        message = "No se pudo iniciar CCCD PA"
-                    )
-                connectionState =
-                    "Negociando protocolo B18..."
+
+            if (
+                retryPaSubscriptionOnce(
+                    gatt,
+                    "no pudo iniciarse la escritura del CCCD"
+                )
+            ) {
+                return
             }
-            sendHello()
+
+            setPaRejected(
+                "PA B19: UUID ...0004 + CCCD presentes, pero no pudo iniciarse la " +
+                    "habilitación de Notify tras 1 reintento"
+            )
+            proceedToHello()
         }
     }
 
@@ -977,20 +1214,32 @@ class BleManager(
             isConnected = true
             connectionState = "Conectado - B18 v2"
 
-            bloodPressureState =
-                if (paCharacteristic != null && paSubscribed) {
+            if (paSubscribed) {
+                bloodPressureState =
                     BloodPressureUiState(
                         status =
-                            BloodPressureStatus.SENSANDO
-                    )
-                } else {
-                    BloodPressureUiState(
-                        status =
-                            BloodPressureStatus.RECHAZADA,
+                            BloodPressureStatus.SENSANDO,
                         message =
-                            "Transporte PA B19 no disponible"
+                            "PA disponible: UUID ...0004 + CCCD + Notify habilitados"
                     )
-                }
+            } else if (
+                bloodPressureState.status !=
+                    BloodPressureStatus.RECHAZADA
+            ) {
+                setPaRejected(
+                    when {
+                        paCharacteristic == null ->
+                            "PA B19: UUID ...0004 no descubierta"
+
+                        paCharacteristic
+                            ?.getDescriptor(CCCD_UUID) == null ->
+                            "PA B19: UUID ...0004 descubierta, pero CCCD 0x2902 ausente"
+
+                        else ->
+                            "PA B19: UUID ...0004 + CCCD presentes, pero Notify no habilitado"
+                    }
+                )
+            }
 
             // Un epoch nuevo parte con STREAM=20. Sólo hay que restaurar una
             // preferencia diferente del valor por defecto.
@@ -1544,6 +1793,7 @@ class BleManager(
         gattConnected = false
         mtuPending = false
         paSubscribed = false
+        paSetupRetryUsed = false
         rxCharacteristic = null
         txCharacteristic = null
         paCharacteristic = null
