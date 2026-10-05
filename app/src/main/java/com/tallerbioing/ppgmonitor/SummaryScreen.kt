@@ -102,7 +102,8 @@ fun SummaryScreen(
 
         ExploratoryVitalsCard(
             spo2 = if (bleManager.spo2Valid) bleManager.spo2 else null,
-            prv = bleManager.prv
+            prv = bleManager.prv,
+            connected = bleManager.isConnected
         )
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -171,10 +172,26 @@ private fun B18StatusCard(
 @Composable
 private fun ExploratoryVitalsCard(
     spo2: Float?,
-    prv: B18Prv?
+    prv: B18Prv?,
+    connected: Boolean
 ) {
 
     val validPrv = prv?.takeIf { it.valid }
+
+    val prvStatus =
+        when {
+            !connected ->
+                "PRV: Sin conexión"
+
+            validPrv != null ->
+                "PRV: Disponible"
+
+            prv == null ->
+                "PRV: Esperando datos..."
+
+            else ->
+                "PRV: Sensando..."
+        }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -218,8 +235,24 @@ private fun ExploratoryVitalsCard(
             )
 
             Text(
+                text = prvStatus,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (validPrv != null) Green else TextSecondary
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
                 text = if (validPrv == null) {
-                    "No disponible"
+                    if (prv == null) {
+                        "La ESP32 todavía no entregó una ventana PRV evaluable."
+                    } else {
+                        "Ventana diagnóstica: " +
+                            "${prv.spanMs / 1000} s · " +
+                            "NN ${prv.nn}/${prv.total} · " +
+                            "limpia ${prv.cleanPercent} %"
+                    }
                 } else {
                     "PP medio ${String.format("%.1f", validPrv.ppMeanMs!!)} ms · " +
                         "RMSSD ${String.format("%.1f", validPrv.rmssdMs!!)} ms\n" +
@@ -227,6 +260,21 @@ private fun ExploratoryVitalsCard(
                         "pNN50 ${String.format("%.1f", validPrv.pnn50Percent!!)} %"
                 },
                 fontSize = 13.sp,
+                color = TextSecondary
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "Presión arterial: pendiente de integración BLE",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextSecondary
+            )
+
+            Text(
+                text = "B18 no transmite todavía valores sistólico/diastólico en mmHg.",
+                fontSize = 12.sp,
                 color = TextSecondary
             )
 
