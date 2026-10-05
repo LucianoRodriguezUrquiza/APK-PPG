@@ -204,26 +204,15 @@ class MainActivity :
     private fun enableTelemetryRecording() {
 
         bleManager.onTelemetryReceived = {
-                bpm,
-                activity,
-                quality,
-                battery ->
-
+                telemetry,
+                boot,
+                epoch ->
 
             measurementRecorder
                 .recordTelemetry(
-
-                    bpm =
-                        bpm,
-
-                    activityCode =
-                        activity,
-
-                    signalQuality =
-                        quality,
-
-                    batteryPercentage =
-                        battery
+                    telemetry = telemetry,
+                    boot = boot,
+                    epoch = epoch
                 )
         }
     }
@@ -398,34 +387,6 @@ fun PPGMonitorApp(
         mutableStateOf(
             AppSection.RESUMEN
         )
-    }
-
-
-    // ========================================================================
-    // MODO DESEADO
-    // ========================================================================
-
-    var deviceMode by
-    rememberSaveable {
-
-        mutableStateOf(
-            DeviceMode.USO
-        )
-    }
-
-
-    // ========================================================================
-    // SINCRONIZAR MODO CON BLE
-    // ========================================================================
-
-    LaunchedEffect(
-        deviceMode
-    ) {
-
-        bleManager
-            .setDesiredMode(
-                deviceMode
-            )
     }
 
 
@@ -711,14 +672,6 @@ fun PPGMonitorApp(
                         altura = ""
 
 
-                        // ----------------------------------------------------
-                        // Nuevo paciente siempre comienza en MODO USO
-                        // ----------------------------------------------------
-
-                        deviceMode =
-                            DeviceMode.USO
-
-
                         selectedSection =
                             AppSection.RESUMEN
 
@@ -734,18 +687,7 @@ fun PPGMonitorApp(
 
 
                 conectar =
-                    conectar,
-
-
-                deviceMode =
-                    deviceMode,
-
-
-                onModeChange = {
-
-                    deviceMode =
-                        it
-                }
+                    conectar
             )
         }
     }
@@ -777,13 +719,7 @@ fun MainDashboard(
     BleManager,
 
     conectar:
-        () -> Unit,
-
-    deviceMode:
-    DeviceMode,
-
-    onModeChange:
-        (DeviceMode) -> Unit
+        () -> Unit
 ) {
 
     Column(
@@ -823,15 +759,7 @@ fun MainDashboard(
             AppSection.RESUMEN -> {
 
                 SummaryScreen(
-
-                    bleManager =
-                        bleManager,
-
-                    deviceMode =
-                        deviceMode,
-
-                    onModeChange =
-                        onModeChange
+                    bleManager = bleManager
                 )
             }
 
