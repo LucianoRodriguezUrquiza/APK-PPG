@@ -53,6 +53,7 @@ import com.tallerbioing.ppgmonitor.data.BloodPressureMeasurementEntity
 import com.tallerbioing.ppgmonitor.data.DailyStatistics
 import com.tallerbioing.ppgmonitor.data.MeasurementEntity
 import com.tallerbioing.ppgmonitor.data.PatientNoteEntity
+import com.tallerbioing.ppgmonitor.data.PeriodSummaryCalculator
 import com.tallerbioing.ppgmonitor.data.PrvMeasurementEntity
 import com.tallerbioing.ppgmonitor.data.SpO2MeasurementEntity
 
@@ -576,7 +577,7 @@ fun RegisterMenuScreen(
 
 
             subtitle =
-                "Exportar paciente, mediciones y notas en formato CSV.",
+                "Exportar datos detallados y resúmenes diarios/semanales en CSV.",
 
 
             icon =
@@ -1905,49 +1906,53 @@ fun DailyRegisterScreen(
 fun AverageRegisterScreen(
     onBack: () -> Unit
 ) {
-
     val context =
         LocalContext.current
 
-
-    val measurementDao =
+    val database =
         remember {
-
-            AppDatabase
-                .getDatabase(
-                    context.applicationContext
-                )
-                .measurementDao()
-        }
-
-
-    val today =
-        remember {
-
-            LocalDate.now()
-        }
-
-
-    val startOfWeekDate =
-        remember(
-            today
-        ) {
-
-            today.minusDays(
-
-                (
-                        today.dayOfWeek.value -
-                                1
-                        ).toLong()
+            AppDatabase.getDatabase(
+                context.applicationContext
             )
         }
 
+    val measurementDao =
+        remember {
+            database.measurementDao()
+        }
+
+    val spo2Dao =
+        remember {
+            database.spO2MeasurementDao()
+        }
+
+    val bloodPressureDao =
+        remember {
+            database.bloodPressureMeasurementDao()
+        }
+
+    val prvDao =
+        remember {
+            database.prvMeasurementDao()
+        }
+
+    val today =
+        remember {
+            LocalDate.now()
+        }
+
+    val startOfWeekDate =
+        remember(today) {
+            today.minusDays(
+                (
+                    today.dayOfWeek.value -
+                        1
+                    ).toLong()
+            )
+        }
 
     val startTimestamp =
-        remember(
-            startOfWeekDate
-        ) {
-
+        remember(startOfWeekDate) {
             startOfWeekDate
                 .atStartOfDay(
                     ZoneId.systemDefault()
@@ -1956,16 +1961,10 @@ fun AverageRegisterScreen(
                 .toEpochMilli()
         }
 
-
     val endTimestamp =
-        remember(
+        remember(today) {
             today
-        ) {
-
-            today
-                .plusDays(
-                    1
-                )
+                .plusDays(1)
                 .atStartOfDay(
                     ZoneId.systemDefault()
                 )
@@ -1974,211 +1973,118 @@ fun AverageRegisterScreen(
                     1L
         }
 
-
     val dateFormatter =
         remember {
-
             DateTimeFormatter.ofPattern(
                 "dd/MM"
             )
         }
-
 
     val formattedRange =
         remember(
             startOfWeekDate,
             today
         ) {
-
-            "${startOfWeekDate.format(dateFormatter)} - ${
+            "${startOfWeekDate.format(dateFormatter)} - " +
                 today.format(dateFormatter)
-            }"
         }
-
 
     var measurements by
     remember {
-
         mutableStateOf(
             emptyList<MeasurementEntity>()
         )
     }
 
+    var spo2Measurements by
+    remember {
+        mutableStateOf(
+            emptyList<SpO2MeasurementEntity>()
+        )
+    }
+
+    var bloodPressureMeasurements by
+    remember {
+        mutableStateOf(
+            emptyList<BloodPressureMeasurementEntity>()
+        )
+    }
+
+    var prvMeasurements by
+    remember {
+        mutableStateOf(
+            emptyList<PrvMeasurementEntity>()
+        )
+    }
 
     var loading by
     remember {
-
-        mutableStateOf(
-            true
-        )
+        mutableStateOf(true)
     }
-
 
     var loadError by
     remember {
-
-        mutableStateOf<String?>(
-            null
-        )
+        mutableStateOf<String?>(null)
     }
-
 
     LaunchedEffect(
         startTimestamp,
         endTimestamp
     ) {
-
-        while (
-            true
-        ) {
-
+        while (true) {
             try {
-
                 measurements =
                     measurementDao
                         .getMeasurementsBetween(
-
-                            startTimestamp =
-                                startTimestamp,
-
-                            endTimestamp =
-                                endTimestamp
+                            startTimestamp,
+                            endTimestamp
                         )
 
+                spo2Measurements =
+                    spo2Dao
+                        .getBetween(
+                            startTimestamp,
+                            endTimestamp
+                        )
 
-                loading =
-                    false
+                bloodPressureMeasurements =
+                    bloodPressureDao
+                        .getBetween(
+                            startTimestamp,
+                            endTimestamp
+                        )
 
+                prvMeasurements =
+                    prvDao
+                        .getBetween(
+                            startTimestamp,
+                            endTimestamp
+                        )
 
-                loadError =
-                    null
-
+                loading = false
+                loadError = null
             } catch (
                 exception: Exception
             ) {
-
-                loading =
-                    false
-
-
+                loading = false
                 loadError =
                     exception.message
                         ?: "Error al leer la base de datos"
             }
 
-
-            delay(
-                2000L
-            )
+            delay(2000L)
         }
     }
 
-
-    // ========================================================================
-    // FC
-    // ========================================================================
-
-    val reliableHeartMeasurements =
-        measurements.filter {
-
-            it.bpm >
-                    0 &&
-                    it.signalQuality >=
-                    MIN_SIGNAL_QUALITY_FOR_HR_STATS
-        }
-
-
-    val weeklyBpms =
-        reliableHeartMeasurements.map {
-
-            it.bpm
-        }
-
-
-    val weeklyAverageBpm =
-        weeklyBpms
-            .takeIf {
-
-                it.isNotEmpty()
-            }
-            ?.average()
-            ?.roundToInt()
-
-
-    val weeklyMinimumBpm =
-        weeklyBpms
-            .minOrNull()
-
-
-    val weeklyMaximumBpm =
-        weeklyBpms
-            .maxOrNull()
-
-
-    // ========================================================================
-    // ACTIVIDAD
-    // ========================================================================
-
-    val validActivityMeasurements =
-        measurements.filter {
-
-            it.activityCode in
-                    0..2
-        }
-
-
-    val totalActivitySamples =
-        validActivityMeasurements
-            .size
-
-
-    val restCount =
-        validActivityMeasurements
-            .count {
-
-                it.activityCode ==
-                        0
-            }
-
-
-    val lightCount =
-        validActivityMeasurements
-            .count {
-
-                it.activityCode ==
-                        1
-            }
-
-
-    val moderateCount =
-        validActivityMeasurements
-            .count {
-
-                it.activityCode ==
-                        2
-            }
-
-
-    val restPercentage =
-        calculatePercentage(
-            restCount,
-            totalActivitySamples
-        )
-
-
-    val lightPercentage =
-        calculatePercentage(
-            lightCount,
-            totalActivitySamples
-        )
-
-
-    val moderatePercentage =
-        calculatePercentage(
-            moderateCount,
-            totalActivitySamples
-        )
-
+    val summary =
+        PeriodSummaryCalculator
+            .calculate(
+                measurements = measurements,
+                spo2Measurements = spo2Measurements,
+                bloodPressureMeasurements =
+                    bloodPressureMeasurements,
+                prvMeasurements = prvMeasurements
+            )
 
     Column(
         modifier =
@@ -2192,321 +2098,227 @@ fun AverageRegisterScreen(
                     vertical = 18.dp
                 )
     ) {
-
         RegisterBackHeader(
-
-            title =
-                "Registros promedios",
-
-            onBack =
-                onBack
+            title = "Registros promedios",
+            onBack = onBack
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    18.dp
-                )
+                Modifier.height(18.dp)
         )
-
 
         Text(
-            text =
-                "Semana actual",
-
-            fontSize =
-                18.sp,
-
-            fontWeight =
-                FontWeight.Bold,
-
-            color =
-                TextPrimary
+            text = "Semana actual",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
         )
-
 
         Text(
-            text =
-                formattedRange,
-
-            fontSize =
-                13.sp,
-
-            color =
-                TextSecondary
+            text = formattedRange,
+            fontSize = 13.sp,
+            color = TextSecondary
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    12.dp
-                )
+                Modifier.height(12.dp)
         )
-
 
         Surface(
             modifier =
                 Modifier.fillMaxWidth(),
-
             shape =
-                RoundedCornerShape(
-                    15.dp
-                ),
-
-            color =
-                White
+                RoundedCornerShape(15.dp),
+            color = White
         ) {
-
             Text(
                 text =
                     when {
-
                         loading ->
-
                             "Cargando registros..."
 
-
-                        loadError !=
-                                null ->
-
+                        loadError != null ->
                             "Error: $loadError"
 
-
                         else ->
-
-                            "Mediciones almacenadas esta semana: ${measurements.size}"
+                            "Semana: " +
+                                "${measurements.size} FC · " +
+                                "${spo2Measurements.size} SpO₂ · " +
+                                "${bloodPressureMeasurements.size} PA · " +
+                                "${prvMeasurements.size} PRV"
                     },
-
                 modifier =
-                    Modifier.padding(
-                        13.dp
-                    ),
-
-                fontSize =
-                    13.sp,
-
-                color =
-                    TextSecondary
+                    Modifier.padding(13.dp),
+                fontSize = 13.sp,
+                color = TextSecondary
             )
         }
 
-
         Spacer(
             modifier =
-                Modifier.height(
-                    15.dp
-                )
+                Modifier.height(15.dp)
         )
 
-
         AverageDataCard(
-
-            title =
-                "Frecuencia cardíaca",
-
+            title = "Frecuencia cardíaca",
             value =
-                weeklyAverageBpm
+                summary.averageBpm
+                    ?.roundToInt()
                     ?.let {
-
                         "$it BPM"
                     }
                     ?: "-- BPM",
-
             description =
-                "Promedio semanal",
-
-            background =
-                PinkSoft
+                "Promedio semanal · mín " +
+                    (summary.minimumBpm
+                        ?.let { "$it" }
+                        ?: "--") +
+                    " · máx " +
+                    (summary.maximumBpm
+                        ?.let { "$it" }
+                        ?: "--"),
+            background = PinkSoft
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    10.dp
-                )
+                Modifier.height(10.dp)
         )
 
+        AverageDataCard(
+            title = "Actividad",
+            value =
+                "Registrado " +
+                    DailyStatistics
+                        .formatDuration(
+                            summary.activity.totalMs
+                        ),
+            description =
+                "Reposo " +
+                    DailyStatistics.formatDuration(
+                        summary.activity.restMs
+                    ) +
+                    " · Leve " +
+                    DailyStatistics.formatDuration(
+                        summary.activity.lightMs
+                    ) +
+                    " · Moderado " +
+                    DailyStatistics.formatDuration(
+                        summary.activity.moderateMs
+                    ),
+            background = BlueSoft
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(10.dp)
+        )
 
         AverageDataCard(
-
-            title =
-                "FC mínima",
-
+            title = "SpO₂",
             value =
-                weeklyMinimumBpm
+                summary.averageSpo2
                     ?.let {
-
-                        "$it BPM"
+                        String.format(
+                            "%.1f %%",
+                            it
+                        )
                     }
-                    ?: "-- BPM",
-
+                    ?: "-- %",
             description =
-                "Mínimo semanal con señal confiable",
-
-            background =
-                PurpleSoft
+                "${summary.spo2Count} valores válidos · promedio semanal",
+            background = PurpleSoft
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    10.dp
-                )
+                Modifier.height(10.dp)
         )
-
 
         AverageDataCard(
-
-            title =
-                "FC máxima",
-
-            value =
-                weeklyMaximumBpm
-                    ?.let {
-
-                        "$it BPM"
-                    }
-                    ?: "-- BPM",
-
-            description =
-                "Máximo semanal con señal confiable",
-
-            background =
-                YellowSoft
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    10.dp
-                )
-        )
-
-
-        AverageDataCard(
-
-            title =
-                "Reposo",
-
+            title = "Presión arterial",
             value =
                 if (
-                    totalActivitySamples >
-                    0
+                    summary.averageSystolic != null &&
+                    summary.averageDiastolic != null
                 ) {
-
-                    "$restPercentage %"
-
+                    "${summary.averageSystolic.roundToInt()}/" +
+                        "${summary.averageDiastolic.roundToInt()} mmHg"
                 } else {
-
-                    "-- %"
+                    "--/-- mmHg"
                 },
-
             description =
-                "Proporción de muestras semanales",
-
-            background =
-                BlueSoft
+                "${summary.bloodPressureCount} estimaciones válidas · promedio semanal",
+            background = YellowSoft
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    10.dp
-                )
+                Modifier.height(10.dp)
         )
-
 
         AverageDataCard(
-
-            title =
-                "Movimiento leve",
-
+            title = "PRV",
             value =
                 if (
-                    totalActivitySamples >
-                    0
+                    summary.averageRmssdMs != null &&
+                    summary.averageSdnnMs != null
                 ) {
-
-                    "$lightPercentage %"
-
+                    "RMSSD " +
+                        String.format(
+                            "%.1f",
+                            summary.averageRmssdMs
+                        ) +
+                        " ms · SDNN " +
+                        String.format(
+                            "%.1f",
+                            summary.averageSdnnMs
+                        ) +
+                        " ms"
                 } else {
-
-                    "-- %"
+                    "RMSSD -- ms · SDNN -- ms"
                 },
-
             description =
-                "Proporción de muestras semanales",
-
-            background =
-                GreenSoft
+                if (
+                    summary.averagePnn50Percent != null &&
+                    summary.averagePpMeanMs != null
+                ) {
+                    "pNN50 " +
+                        String.format(
+                            "%.1f %%",
+                            summary.averagePnn50Percent
+                        ) +
+                        " · PP medio " +
+                        String.format(
+                            "%.1f ms",
+                            summary.averagePpMeanMs
+                        ) +
+                        " · ${summary.prvCount} ventanas"
+                } else {
+                    "${summary.prvCount} ventanas PRV válidas"
+                },
+            background = GreenSoft
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    10.dp
-                )
+                Modifier.height(14.dp)
         )
-
-
-        AverageDataCard(
-
-            title =
-                "Movimiento moderado",
-
-            value =
-                if (
-                    totalActivitySamples >
-                    0
-                ) {
-
-                    "$moderatePercentage %"
-
-                } else {
-
-                    "-- %"
-                },
-
-            description =
-                "Proporción de muestras semanales",
-
-            background =
-                YellowSoft
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    14.dp
-                )
-        )
-
 
         Text(
             text =
-                "Muestras utilizadas para FC: ${reliableHeartMeasurements.size} de ${measurements.size}. Se consideran para FC únicamente señales con calidad buena o excelente.",
-
-            fontSize =
-                11.sp,
-
-            color =
-                TextSecondary
+                "Los promedios semanales usan únicamente registros válidos. " +
+                    "Los huecos prolongados de desconexión no se contabilizan como actividad. " +
+                    "SpO₂, presión arterial y PRV son variables exploratorias.",
+            fontSize = 11.sp,
+            color = TextSecondary
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    20.dp
-                )
+                Modifier.height(20.dp)
         )
     }
 }

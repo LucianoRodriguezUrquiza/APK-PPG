@@ -15,6 +15,15 @@ interface SpO2MeasurementDao {
         """
         SELECT *
         FROM spo2_measurements
+        ORDER BY timestamp ASC
+        """
+    )
+    suspend fun getAll(): List<SpO2MeasurementEntity>
+
+    @Query(
+        """
+        SELECT *
+        FROM spo2_measurements
         WHERE timestamp >= :startTimestamp
           AND timestamp <= :endTimestamp
         ORDER BY timestamp ASC
@@ -39,6 +48,15 @@ interface BloodPressureMeasurementDao {
         """
         SELECT *
         FROM blood_pressure_measurements
+        ORDER BY timestamp ASC
+        """
+    )
+    suspend fun getAll(): List<BloodPressureMeasurementEntity>
+
+    @Query(
+        """
+        SELECT *
+        FROM blood_pressure_measurements
         WHERE timestamp >= :startTimestamp
           AND timestamp <= :endTimestamp
         ORDER BY timestamp ASC
@@ -58,6 +76,15 @@ interface PrvMeasurementDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(measurement: PrvMeasurementEntity)
+
+    @Query(
+        """
+        SELECT *
+        FROM prv_measurements
+        ORDER BY timestamp ASC
+        """
+    )
+    suspend fun getAll(): List<PrvMeasurementEntity>
 
     @Query(
         """
