@@ -188,9 +188,15 @@ private fun ExploratoryVitalsCard(
                 String.format("%.0f %%", it)
         } ?: "SpO₂: Calculando…"
 
+    val systolicMmHg =
+        bloodPressure.systolicMmHg
+
+    val diastolicMmHg =
+        bloodPressure.diastolicMmHg
+
     val hasBloodPressure =
-        bloodPressure.systolicMmHg != null &&
-            bloodPressure.diastolicMmHg != null
+        systolicMmHg != null &&
+            diastolicMmHg != null
 
     val bloodPressureText =
         when {
@@ -198,8 +204,8 @@ private fun ExploratoryVitalsCard(
                 "Presión arterial: " +
                     String.format(
                         "%.0f/%.0f mmHg",
-                        bloodPressure.systolicMmHg,
-                        bloodPressure.diastolicMmHg
+                        systolicMmHg,
+                        diastolicMmHg
                     )
 
             bloodPressure.message ==
@@ -287,15 +293,7 @@ private fun ExploratoryVitalsCard(
                     },
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
-                color =
-                    if (
-                        connected &&
-                        validPrv != null
-                    ) {
-                        Green
-                    } else {
-                        TextPrimary
-                    }
+                color = TextPrimary
             )
 
             Spacer(
