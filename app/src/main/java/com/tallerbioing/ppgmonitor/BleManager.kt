@@ -81,6 +81,7 @@ class BleManager(
         private const val MAX_COMMAND_ATTEMPTS = 2
         private const val MAX_PPG_SAMPLES = 240
         private const val PA_SETUP_RETRY_DELAY_MS = 300L
+        private const val PA_PROLONGED_NO_CONTACT_MS = 5_000L
 
         private val SERVICE_UUID =
             UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -240,6 +241,7 @@ class BleManager(
     private var spo2ReceivedElapsed = 0L
     private var spo2AgeAtReceive: Long? = null
     private var prvReceivedElapsed = 0L
+    private var paNoContactStartedElapsed = 0L
 
     private val bloodPressureAssembler =
         BloodPressureWindowAssembler()
@@ -1472,7 +1474,28 @@ class BleManager(
     // ---------------------------------------------------------------------
 
     private fun handleBpm(value: B18Bpm) {
-        lastBReceivedElapsed = SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
+        lastBReceivedElapsed = now
+
+        if (value.state == 1) {
+            if (paNoContactStartedElapsed == 0L) {
+                paNoContactStartedElapsed = now
+            }
+        } else {
+            paNoContactStartedElapsed = 0L
+
+            if (
+                bloodPressureState.message ==
+                    "Señal insuficiente"
+            ) {
+                bloodPressureState =
+                    bloodPressureState.copy(
+                        status =
+                            BloodPressureStatus.SENSANDO,
+                        message = null
+                    )
+            }
+        }
 
         bpm = if (value.visible && value.bpm != null) value.bpm else 0
         bpmVisible = value.visible && value.bpm != null
@@ -1588,18 +1611,19 @@ class BleManager(
         ) {
             is BloodPressureTransportEvent.Began -> {
                 bloodPressureState =
-                    BloodPressureUiState(
+                    bloodPressureState.copy(
                         status =
                             BloodPressureStatus.TRANSFIRIENDO,
                         windowSeq =
                             event.windowSeq,
-                        progressSamples = 0
+                        progressSamples = 0,
+                        message = null
                     )
             }
 
             is BloodPressureTransportEvent.Progress -> {
                 bloodPressureState =
-                    BloodPressureUiState(
+                    bloodPressureState.copy(
                         status =
                             BloodPressureStatus.TRANSFIRIENDO,
                         windowSeq =
@@ -1614,7 +1638,7 @@ class BleManager(
 
             is BloodPressureTransportEvent.Rejected -> {
                 bloodPressureState =
-                    BloodPressureUiState(
+                    bloodPressureState.copy(
                         status =
                             BloodPressureStatus.RECHAZADA,
                         message =
@@ -1638,7 +1662,7 @@ class BleManager(
     ) {
         if (bloodPressureInferenceRunning) {
             bloodPressureState =
-                BloodPressureUiState(
+                bloodPressureState.copy(
                     status =
                         BloodPressureStatus.RECHAZADA,
                     windowSeq =
@@ -1655,11 +1679,13 @@ class BleManager(
             bloodPressureSessionGeneration
 
         bloodPressureState =
-            BloodPressureUiState(
+            bloodPressureState.copy(
                 status =
                     BloodPressureStatus.CALCULANDO,
                 windowSeq =
-                    windowSeq
+                    windowSeq,
+                progressSamples = 700,
+                message = null
             )
 
         bloodPressureScope.launch {
@@ -1725,7 +1751,7 @@ class BleManager(
                     }
 
                     bloodPressureState =
-                        BloodPressureUiState(
+                        bloodPressureState.copy(
                             status =
                                 BloodPressureStatus.RECHAZADA,
                             windowSeq =
@@ -1778,6 +1804,30 @@ class BleManager(
                     spo2 = null
                     spo2Valid = false
                     spo2Reason = 5
+                }
+            }
+
+            if (
+                paNoContactStartedElapsed != 0L &&
+                now - paNoContactStartedElapsed >=
+                    PA_PROLONGED_NO_CONTACT_MS
+            ) {
+                if (
+                    bloodPressureState.message !=
+                        "Señal insuficiente" ||
+                    bloodPressureState.systolicMmHg != null ||
+                    bloodPressureState.diastolicMmHg != null
+                ) {
+                    bloodPressureState =
+                        bloodPressureState.copy(
+                            status =
+                                BloodPressureStatus.RECHAZADA,
+                            systolicMmHg = null,
+                            diastolicMmHg = null,
+                            progressSamples = 0,
+                            message =
+                                "Señal insuficiente"
+                        )
                 }
             }
 
@@ -1956,6 +2006,7 @@ class BleManager(
         spo2ReceivedElapsed = 0L
         spo2AgeAtReceive = null
         prvReceivedElapsed = 0L
+        paNoContactStartedElapsed = 0L
         lastPpgSequence = null
         lastPpgSampleTime = null
 
