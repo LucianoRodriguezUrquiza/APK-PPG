@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 import com.tallerbioing.ppgmonitor.data.AppDatabase
+import com.tallerbioing.ppgmonitor.data.ExploratoryMeasurementRecorder
 import com.tallerbioing.ppgmonitor.data.MeasurementRecorder
 import com.tallerbioing.ppgmonitor.ui.theme.PPGMonitorTheme
 
@@ -139,6 +140,9 @@ class MainActivity :
     private lateinit var measurementRecorder:
             MeasurementRecorder
 
+    private lateinit var exploratoryMeasurementRecorder:
+            ExploratoryMeasurementRecorder
+
 
     override fun onCreate(
         savedInstanceState: Bundle?
@@ -157,6 +161,11 @@ class MainActivity :
 
         measurementRecorder =
             MeasurementRecorder(
+                applicationContext
+            )
+
+        exploratoryMeasurementRecorder =
+            ExploratoryMeasurementRecorder(
                 applicationContext
             )
 
@@ -203,6 +212,41 @@ class MainActivity :
                     epoch = epoch
                 )
         }
+
+        bleManager.onSpo2Measurement = {
+                value,
+                boot ->
+
+            exploratoryMeasurementRecorder
+                .recordSpo2(
+                    value = value,
+                    boot = boot
+                )
+        }
+
+        bleManager.onPrvMeasurement = {
+                value,
+                boot ->
+
+            exploratoryMeasurementRecorder
+                .recordPrv(
+                    value = value,
+                    boot = boot
+                )
+        }
+
+        bleManager.onBloodPressureMeasurement = {
+                estimate,
+                windowSeq,
+                boot ->
+
+            exploratoryMeasurementRecorder
+                .recordBloodPressure(
+                    estimate = estimate,
+                    windowSeq = windowSeq,
+                    boot = boot
+                )
+        }
     }
 
 
@@ -213,6 +257,15 @@ class MainActivity :
     private fun disableTelemetryRecording() {
 
         bleManager.onTelemetryReceived =
+            null
+
+        bleManager.onSpo2Measurement =
+            null
+
+        bleManager.onPrvMeasurement =
+            null
+
+        bleManager.onBloodPressureMeasurement =
             null
     }
 
@@ -226,6 +279,8 @@ class MainActivity :
 
 
         measurementRecorder.close()
+
+        exploratoryMeasurementRecorder.close()
 
 
         super.onDestroy()
@@ -634,6 +689,18 @@ fun PPGMonitorApp(
                         database
                             .measurementDao()
                             .deleteAllMeasurements()
+
+                        database
+                            .spO2MeasurementDao()
+                            .deleteAll()
+
+                        database
+                            .bloodPressureMeasurementDao()
+                            .deleteAll()
+
+                        database
+                            .prvMeasurementDao()
+                            .deleteAll()
 
 
                         database
