@@ -44,6 +44,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+import com.tallerbioing.ppgmonitor.bp.BloodPressureUiState
+
 import java.time.LocalDate
 
 
@@ -103,7 +105,8 @@ fun SummaryScreen(
         ExploratoryVitalsCard(
             spo2 = if (bleManager.spo2Valid) bleManager.spo2 else null,
             prv = bleManager.prv,
-            connected = bleManager.isConnected
+            connected = bleManager.isConnected,
+            bloodPressure = bleManager.bloodPressureState
         )
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -173,24 +176,56 @@ private fun B18StatusCard(
 private fun ExploratoryVitalsCard(
     spo2: Float?,
     prv: B18Prv?,
-    connected: Boolean
+    connected: Boolean,
+    bloodPressure: BloodPressureUiState
 ) {
+    val validPrv =
+        prv?.takeIf { it.valid }
 
-    val validPrv = prv?.takeIf { it.valid }
+    val spo2Text =
+        spo2?.let {
+            "SpO₂: " +
+                String.format("%.0f %%", it)
+        } ?: "SpO₂: Calculando…"
 
-    val prvStatus =
+    val systolicMmHg =
+        bloodPressure.systolicMmHg
+
+    val diastolicMmHg =
+        bloodPressure.diastolicMmHg
+
+    val hasBloodPressure =
+        systolicMmHg != null &&
+            diastolicMmHg != null
+
+    val bloodPressureText =
         when {
-            !connected ->
-                "PRV: Sin conexión"
+            hasBloodPressure ->
+                "Presión arterial: " +
+                    String.format(
+                        "%.0f/%.0f mmHg",
+                        systolicMmHg,
+                        diastolicMmHg
+                    )
 
+            bloodPressure.message ==
+                "Señal insuficiente" ->
+                "Presión arterial: Señal insuficiente"
+
+            else ->
+                "Presión arterial: Calculando…"
+        }
+
+    val prvText =
+        when {
             validPrv != null ->
                 "PRV: Disponible"
 
             prv == null ->
-                "PRV: Esperando datos..."
+                "PRV: Calculando…"
 
             else ->
-                "PRV: Sensando..."
+                "PRV: Señal insuficiente"
         }
 
     Card(
@@ -203,11 +238,9 @@ private fun ExploratoryVitalsCard(
             defaultElevation = 2.dp
         )
     ) {
-
         Column(
             modifier = Modifier.padding(18.dp)
         ) {
-
             Text(
                 text = "VARIABLES EXPLORATORIAS",
                 fontSize = 12.sp,
@@ -215,78 +248,63 @@ private fun ExploratoryVitalsCard(
                 color = TextSecondary
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(
+                modifier = Modifier.height(12.dp)
+            )
 
             Text(
-                text = "SpO₂: " +
-                    (spo2?.let { String.format("%.1f %%", it) } ?: "--"),
+                text =
+                    if (connected) {
+                        spo2Text
+                    } else {
+                        "SpO₂: Calculando…"
+                    },
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextPrimary
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(
+                modifier = Modifier.height(12.dp)
+            )
 
             Text(
-                text = "PRV (PPG, no ECG)",
-                fontSize = 14.sp,
+                text =
+                    if (connected) {
+                        bloodPressureText
+                    } else {
+                        "Presión arterial: Calculando…"
+                    },
+                fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextPrimary
             )
 
-            Text(
-                text = prvStatus,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = if (validPrv != null) Green else TextSecondary
+            Spacer(
+                modifier = Modifier.height(12.dp)
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
-
             Text(
-                text = if (validPrv == null) {
-                    if (prv == null) {
-                        "La ESP32 todavía no entregó una ventana PRV evaluable."
+                text =
+                    if (connected) {
+                        prvText
                     } else {
-                        "Ventana diagnóstica: " +
-                            "${prv.spanMs / 1000} s · " +
-                            "NN ${prv.nn}/${prv.total} · " +
-                            "limpia ${prv.cleanPercent} %"
-                    }
-                } else {
-                    "PP medio ${String.format("%.1f", validPrv.ppMeanMs!!)} ms · " +
-                        "RMSSD ${String.format("%.1f", validPrv.rmssdMs!!)} ms\n" +
-                        "SDNN ${String.format("%.1f", validPrv.sdnnMs!!)} ms · " +
-                        "pNN50 ${String.format("%.1f", validPrv.pnn50Percent!!)} %"
-                },
-                fontSize = 13.sp,
-                color = TextSecondary
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Text(
-                text = "Presión arterial: pendiente de integración BLE",
-                fontSize = 13.sp,
+                        "PRV: Calculando…"
+                    },
+                fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
-                color = TextSecondary
+                color = TextPrimary
+            )
+
+            Spacer(
+                modifier = Modifier.height(10.dp)
             )
 
             Text(
-                text = "B18 no transmite todavía valores sistólico/diastólico en mmHg.",
-                fontSize = 12.sp,
+                text = "Experimental · No validada clínicamente",
+                fontSize = 11.sp,
                 color = TextSecondary
             )
-
-            if (validPrv?.flag == true) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Patrón irregular exploratorio detectado",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Pink
-                )
-            }
         }
     }
 }

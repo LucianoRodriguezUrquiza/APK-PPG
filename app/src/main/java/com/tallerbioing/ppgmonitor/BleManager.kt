@@ -28,6 +28,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 
+import com.tallerbioing.ppgmonitor.bp.BloodPressureModel
+import com.tallerbioing.ppgmonitor.bp.BloodPressurePreprocessor
+import com.tallerbioing.ppgmonitor.bp.BloodPressureStatus
+import com.tallerbioing.ppgmonitor.bp.BloodPressureTransportEvent
+import com.tallerbioing.ppgmonitor.bp.BloodPressureUiState
+import com.tallerbioing.ppgmonitor.bp.BloodPressureWindowAssembler
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+
 import java.nio.charset.StandardCharsets
 import java.util.ArrayDeque
 import java.util.UUID
@@ -67,6 +80,8 @@ class BleManager(
         private const val MAX_HELLO_ATTEMPTS = 3
         private const val MAX_COMMAND_ATTEMPTS = 2
         private const val MAX_PPG_SAMPLES = 240
+        private const val PA_SETUP_RETRY_DELAY_MS = 300L
+        private const val PA_PROLONGED_NO_CONTACT_MS = 5_000L
 
         private val SERVICE_UUID =
             UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -74,6 +89,8 @@ class BleManager(
             UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
         private val TX_UUID =
             UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val PA_TX_UUID =
+            UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
         private val CCCD_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
     }
@@ -142,6 +159,9 @@ class BleManager(
     var diagnostics by mutableStateOf<B18Diagnostics?>(null)
         private set
 
+    var bloodPressureState by mutableStateOf(BloodPressureUiState())
+        private set
+
     val bpmStateText: String
         get() = when (bpmStateCode) {
             1 -> "Sin contacto"
@@ -188,6 +208,7 @@ class BleManager(
     private var bluetoothGatt: BluetoothGatt? = null
     private var rxCharacteristic: BluetoothGattCharacteristic? = null
     private var txCharacteristic: BluetoothGattCharacteristic? = null
+    private var paCharacteristic: BluetoothGattCharacteristic? = null
 
     private var scanning = false
     private var closed = false
@@ -196,6 +217,11 @@ class BleManager(
 
     private var gattConnected = false
     private var subscribed = false
+    private var paSubscribed = false
+    private var paSetupRetryUsed = false
+    private var paGattCacheRefreshUsed = false
+    private var paGattCacheReconnectPending = false
+    private var paGattCacheRefreshDetail = "no ejecutado"
     private var negotiated = false
     private var mtuPending = false
     private var activeDevice: BluetoothDevice? = null
@@ -215,6 +241,27 @@ class BleManager(
     private var spo2ReceivedElapsed = 0L
     private var spo2AgeAtReceive: Long? = null
     private var prvReceivedElapsed = 0L
+    private var paNoContactStartedElapsed = 0L
+
+    private val bloodPressureAssembler =
+        BloodPressureWindowAssembler()
+
+    private val bloodPressureScope =
+        CoroutineScope(
+            SupervisorJob() + Dispatchers.Default
+        )
+
+    private val bloodPressureModelLock =
+        Any()
+
+    private var bloodPressureModel:
+        BloodPressureModel? = null
+
+    private var bloodPressureInferenceRunning =
+        false
+
+    private var bloodPressureSessionGeneration =
+        0L
 
     private data class PendingCommand(
         val command: String,
@@ -304,6 +351,11 @@ class BleManager(
         bluetoothGatt = null
         activeDevice = null
         onTelemetryReceived = null
+        bloodPressureScope.cancel()
+        synchronized(bloodPressureModelLock) {
+            bloodPressureModel?.close()
+            bloodPressureModel = null
+        }
         connectionState = "Desconectado"
     }
 
@@ -438,6 +490,63 @@ class BleManager(
                 return
             }
 
+            if (
+                paGattCacheReconnectPending &&
+                newState == BluetoothProfile.STATE_DISCONNECTED &&
+                (bluetoothGatt == null || bluetoothGatt === gatt)
+            ) {
+                paGattCacheReconnectPending = false
+                bluetoothGatt = gatt
+
+                val device =
+                    activeDevice ?: gatt.device
+
+                val refreshResult =
+                    refreshGattCache(gatt)
+
+                paGattCacheRefreshDetail =
+                    refreshResult.second
+
+                Log.w(
+                    TAG,
+                    "PA B19: refresh GATT cache -> " +
+                        "${refreshResult.second}; reconectando una única vez"
+                )
+
+                clearSessionState()
+                gatt.close()
+
+                if (bluetoothGatt === gatt) {
+                    bluetoothGatt = null
+                }
+
+                onMain {
+                    bloodPressureState =
+                        BloodPressureUiState(
+                            status =
+                                BloodPressureStatus.SENSANDO,
+                            message =
+                                "PA B19: caché GATT actualizada; reconectando (1/1)..."
+                        )
+                    connectionState =
+                        "Reconectando tras limpiar caché GATT..."
+                }
+
+                mainHandler.postDelayed(
+                    {
+                        if (
+                            !closed &&
+                            !gattConnected
+                        ) {
+                            connectToDevice(device)
+                        }
+                    },
+                    600L
+                )
+
+                return
+            }
+
             if (status == BluetoothGatt.GATT_SUCCESS &&
                 newState == BluetoothProfile.STATE_CONNECTED
             ) {
@@ -495,6 +604,7 @@ class BleManager(
             val service = gatt.getService(SERVICE_UUID)
             val rx = service?.getCharacteristic(RX_UUID)
             val tx = service?.getCharacteristic(TX_UUID)
+            val pa = service?.getCharacteristic(PA_TX_UUID)
 
             if (service == null || rx == null || tx == null) {
                 failCurrentGatt("Nordic UART Service B18 no encontrado")
@@ -503,20 +613,76 @@ class BleManager(
 
             rxCharacteristic = rx
             txCharacteristic = tx
+            paCharacteristic = pa
 
-            onMain { connectionState = "Negociando MTU..." }
+            val paCccd =
+                pa?.getDescriptor(CCCD_UUID)
 
-            // El funcionamiento no depende del resultado. Si la petición no se
-            // inicia o el callback no llega, seguimos con MTU 23.
-            mtuPending = true
-            if (!gatt.requestMtu(247)) {
-                mtuPending = false
-                onMain { negotiatedMtu = 23 }
-                enableNotifications(gatt)
+            Log.i(
+                TAG,
+                "PA B19 discovery: uuid0004=${pa != null} " +
+                    "cccd=${paCccd != null} retryUsed=$paSetupRetryUsed"
+            )
+
+            if (pa == null) {
+                if (
+                    retryPaDiscoveryOnce(
+                        gatt,
+                        "UUID ...0004 no descubierta"
+                    )
+                ) {
+                    return
+                }
+
+                if (
+                    requestPaGattCacheRefreshReconnectOnce(
+                        gatt,
+                        "UUID ...0004 siguió ausente tras redescubrir servicios"
+                    )
+                ) {
+                    return
+                }
+
+                setPaRejected(
+                    "PA B19: UUID ...0004 sigue sin aparecer incluso tras limpiar caché " +
+                        "GATT y reconectar. refresh=$paGattCacheRefreshDetail"
+                )
+            } else if (paCccd == null) {
+                if (
+                    retryPaDiscoveryOnce(
+                        gatt,
+                        "UUID ...0004 presente pero CCCD 0x2902 ausente"
+                    )
+                ) {
+                    return
+                }
+
+                if (
+                    requestPaGattCacheRefreshReconnectOnce(
+                        gatt,
+                        "UUID ...0004 apareció sin CCCD 0x2902"
+                    )
+                ) {
+                    return
+                }
+
+                setPaRejected(
+                    "PA B19: UUID ...0004 existe pero CCCD 0x2902 sigue ausente incluso " +
+                        "tras limpiar caché GATT y reconectar. refresh=$paGattCacheRefreshDetail"
+                )
             } else {
-                mainHandler.removeCallbacks(mtuTimeoutRunnable)
-                mainHandler.postDelayed(mtuTimeoutRunnable, MTU_TIMEOUT_MS)
+                onMain {
+                    bloodPressureState =
+                        BloodPressureUiState(
+                            status =
+                                BloodPressureStatus.SENSANDO,
+                            message =
+                                "PA B19: UUID ...0004 y CCCD descubiertos; habilitando Notify"
+                        )
+                }
             }
+
+            continueAfterServiceDiscovery(gatt)
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
@@ -541,23 +707,106 @@ class BleManager(
         ) {
             if (gatt !== bluetoothGatt || descriptor.uuid != CCCD_UUID) return
 
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                failCurrentGatt("No se pudo habilitar Notify: $status")
-                return
-            }
+            when (descriptor.characteristic.uuid) {
+                TX_UUID -> {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        failCurrentGatt("No se pudo habilitar Notify B18: $status")
+                        return
+                    }
 
-            subscribed = true
-            onMain { connectionState = "Negociando protocolo B18..." }
-            sendHello()
+                    subscribed = true
+
+                    if (paCharacteristic != null) {
+                        enablePaNotifications(gatt)
+                    } else {
+                        paSubscribed = false
+
+                        if (
+                            requestPaGattCacheRefreshReconnectOnce(
+                                gatt,
+                                "UUID ...0004 no disponible al habilitar notificaciones"
+                            )
+                        ) {
+                            return
+                        }
+
+                        if (
+                            bloodPressureState.status !=
+                                BloodPressureStatus.RECHAZADA
+                        ) {
+                            setPaRejected(
+                                "PA B19: UUID ...0004 no disponible tras refresh/reconexión. " +
+                                    "refresh=$paGattCacheRefreshDetail"
+                            )
+                        }
+
+                        proceedToHello()
+                    }
+                }
+
+                PA_TX_UUID -> {
+                    Log.i(
+                        TAG,
+                        "PA B19 CCCD write status=$status retryUsed=$paSetupRetryUsed"
+                    )
+
+                    if (
+                        status !=
+                            BluetoothGatt.GATT_SUCCESS
+                    ) {
+                        if (
+                            retryPaSubscriptionOnce(
+                                gatt,
+                                "escritura CCCD falló (status=$status)"
+                            )
+                        ) {
+                            return
+                        }
+
+                        paSubscribed = false
+                        setPaRejected(
+                            "PA B19: UUID ...0004 y CCCD existen, pero falló habilitar Notify " +
+                                "(status=$status) tras 1 reintento"
+                        )
+                        proceedToHello()
+                        return
+                    }
+
+                    paSubscribed = true
+
+                    onMain {
+                        bloodPressureState =
+                            BloodPressureUiState(
+                                status =
+                                    BloodPressureStatus.SENSANDO,
+                                message =
+                                    "PA disponible: UUID ...0004 + CCCD + Notify habilitados"
+                            )
+                    }
+
+                    proceedToHello()
+                }
+            }
         }
 
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            if (gatt !== bluetoothGatt || characteristic.uuid != TX_UUID) return
+            if (gatt !== bluetoothGatt) return
             val copy = characteristic.value?.clone() ?: return
-            onMain { consumeNotification(copy) }
+
+            when (characteristic.uuid) {
+                TX_UUID ->
+                    onMain {
+                        consumeNotification(copy)
+                    }
+
+                PA_TX_UUID ->
+                    onMain {
+                        consumePaNotification(copy)
+                    }
+            }
         }
 
         override fun onCharacteristicChanged(
@@ -565,9 +814,20 @@ class BleManager(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            if (gatt !== bluetoothGatt || characteristic.uuid != TX_UUID) return
+            if (gatt !== bluetoothGatt) return
             val copy = value.clone()
-            onMain { consumeNotification(copy) }
+
+            when (characteristic.uuid) {
+                TX_UUID ->
+                    onMain {
+                        consumeNotification(copy)
+                    }
+
+                PA_TX_UUID ->
+                    onMain {
+                        consumePaNotification(copy)
+                    }
+            }
         }
 
         override fun onCharacteristicWrite(
@@ -603,6 +863,258 @@ class BleManager(
         mtuPending = false
         negotiatedMtu = 23
         enableNotifications(gatt)
+    }
+
+
+    @SuppressLint("MissingPermission")
+    private fun continueAfterServiceDiscovery(
+        gatt: BluetoothGatt
+    ) {
+        if (gatt !== bluetoothGatt) return
+
+        onMain {
+            connectionState =
+                "Negociando MTU..."
+        }
+
+        // B18 behavior is preserved. PA discovery is optional and never blocks
+        // the validated NUS path after its single controlled retry.
+        mtuPending = true
+
+        if (!gatt.requestMtu(247)) {
+            mtuPending = false
+            onMain {
+                negotiatedMtu = 23
+            }
+            enableNotifications(gatt)
+        } else {
+            mainHandler.removeCallbacks(
+                mtuTimeoutRunnable
+            )
+            mainHandler.postDelayed(
+                mtuTimeoutRunnable,
+                MTU_TIMEOUT_MS
+            )
+        }
+    }
+
+
+    @SuppressLint("MissingPermission")
+    private fun retryPaDiscoveryOnce(
+        gatt: BluetoothGatt,
+        reason: String
+    ): Boolean {
+        if (paSetupRetryUsed) {
+            return false
+        }
+
+        paSetupRetryUsed = true
+
+        Log.w(
+            TAG,
+            "PA B19: $reason; reintentando discoverServices una única vez"
+        )
+
+        onMain {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.SENSANDO,
+                    message =
+                        "PA B19: $reason. Reintentando descubrimiento (1/1)..."
+                )
+            connectionState =
+                "Reintentando descubrimiento PA..."
+        }
+
+        mainHandler.postDelayed(
+            {
+                if (
+                    gatt !== bluetoothGatt ||
+                    !gattConnected
+                ) {
+                    return@postDelayed
+                }
+
+                if (!gatt.discoverServices()) {
+                    setPaRejected(
+                        "PA B19: el reintento de descubrimiento GATT no pudo iniciarse"
+                    )
+                    continueAfterServiceDiscovery(
+                        gatt
+                    )
+                }
+            },
+            PA_SETUP_RETRY_DELAY_MS
+        )
+
+        return true
+    }
+
+
+    @SuppressLint("MissingPermission")
+    private fun requestPaGattCacheRefreshReconnectOnce(
+        gatt: BluetoothGatt,
+        reason: String
+    ): Boolean {
+        if (
+            paGattCacheRefreshUsed ||
+            paGattCacheReconnectPending
+        ) {
+            return false
+        }
+
+        paGattCacheRefreshUsed = true
+        paGattCacheReconnectPending = true
+
+        Log.w(
+            TAG,
+            "PA B19: $reason; solicitando refresh GATT + reconexión única"
+        )
+
+        onMain {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.SENSANDO,
+                    message =
+                        "PA B19: $reason. Limpiando caché GATT y reconectando (1/1)..."
+                )
+            connectionState =
+                "Limpiando caché GATT PA..."
+        }
+
+        try {
+            gatt.disconnect()
+        } catch (
+            error: SecurityException
+        ) {
+            paGattCacheReconnectPending = false
+
+            val refreshResult =
+                refreshGattCache(gatt)
+
+            paGattCacheRefreshDetail =
+                refreshResult.second
+
+            setPaRejected(
+                "PA B19: no se pudo desconectar para refrescar caché GATT. " +
+                    "refresh=$paGattCacheRefreshDetail"
+            )
+        }
+
+        return true
+    }
+
+
+    private fun refreshGattCache(
+        gatt: BluetoothGatt
+    ): Pair<Boolean, String> =
+        try {
+            val method =
+                gatt.javaClass.getMethod(
+                    "refresh"
+                )
+
+            val result =
+                method.invoke(gatt)
+
+            val ok =
+                (result as? Boolean) == true
+
+            Pair(
+                ok,
+                if (ok) {
+                    "refresh() OK"
+                } else {
+                    "refresh() devolvió false"
+                }
+            )
+        } catch (
+            error: Throwable
+        ) {
+            Log.w(
+                TAG,
+                "PA B19: BluetoothGatt.refresh() no disponible",
+                error
+            )
+
+            Pair(
+                false,
+                "refresh() no disponible: " +
+                    error.javaClass.simpleName
+            )
+        }
+
+
+    private fun setPaRejected(
+        message: String
+    ) {
+        Log.w(TAG, message)
+
+        onMain {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.RECHAZADA,
+                    message = message
+                )
+        }
+    }
+
+
+    private fun proceedToHello() {
+        onMain {
+            connectionState =
+                "Negociando protocolo B18..."
+        }
+        sendHello()
+    }
+
+
+    @SuppressLint("MissingPermission")
+    private fun retryPaSubscriptionOnce(
+        gatt: BluetoothGatt,
+        reason: String
+    ): Boolean {
+        if (paSetupRetryUsed) {
+            return false
+        }
+
+        paSetupRetryUsed = true
+
+        Log.w(
+            TAG,
+            "PA B19: $reason; reintentando suscripción una única vez"
+        )
+
+        onMain {
+            bloodPressureState =
+                BloodPressureUiState(
+                    status =
+                        BloodPressureStatus.SENSANDO,
+                    message =
+                        "PA B19: $reason. Reintentando Notify (1/1)..."
+                )
+        }
+
+        mainHandler.postDelayed(
+            {
+                if (
+                    gatt !== bluetoothGatt ||
+                    !gattConnected
+                ) {
+                    return@postDelayed
+                }
+
+                enablePaNotifications(
+                    gatt
+                )
+            },
+            PA_SETUP_RETRY_DELAY_MS
+        )
+
+        return true
     }
 
 
@@ -645,6 +1157,127 @@ class BleManager(
             failCurrentGatt("No se pudo iniciar escritura CCCD")
         }
     }
+
+
+    @SuppressLint("MissingPermission")
+    private fun enablePaNotifications(
+        gatt: BluetoothGatt
+    ) {
+        if (gatt !== bluetoothGatt) return
+
+        val pa =
+            paCharacteristic
+
+        if (pa == null) {
+            paSubscribed = false
+            setPaRejected(
+                "PA B19: UUID ...0004 no fue descubierta tras 1 reintento"
+            )
+            proceedToHello()
+            return
+        }
+
+        val descriptor =
+            pa.getDescriptor(CCCD_UUID)
+
+        if (descriptor == null) {
+            paSubscribed = false
+
+            if (
+                retryPaDiscoveryOnce(
+                    gatt,
+                    "UUID ...0004 presente pero CCCD 0x2902 ausente"
+                )
+            ) {
+                return
+            }
+
+            setPaRejected(
+                "PA B19: UUID ...0004 existe, pero no tiene CCCD 0x2902 tras 1 reintento"
+            )
+            proceedToHello()
+            return
+        }
+
+        onMain {
+            connectionState =
+                "Activando transporte PA..."
+        }
+
+        Log.i(
+            TAG,
+            "PA B19: UUID ...0004 + CCCD presentes; setCharacteristicNotification()"
+        )
+
+        if (
+            !gatt.setCharacteristicNotification(
+                pa,
+                true
+            )
+        ) {
+            paSubscribed = false
+
+            if (
+                retryPaSubscriptionOnce(
+                    gatt,
+                    "setCharacteristicNotification() devolvió false"
+                )
+            ) {
+                return
+            }
+
+            setPaRejected(
+                "PA B19: UUID ...0004 + CCCD presentes, pero la activación local de Notify " +
+                    "falló tras 1 reintento"
+            )
+            proceedToHello()
+            return
+        }
+
+        val value =
+            BluetoothGattDescriptor
+                .ENABLE_NOTIFICATION_VALUE
+
+        val started =
+            if (
+                Build.VERSION.SDK_INT >=
+                    Build.VERSION_CODES.TIRAMISU
+            ) {
+                gatt.writeDescriptor(
+                    descriptor,
+                    value
+                ) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    descriptor.value = value
+                    gatt.writeDescriptor(
+                        descriptor
+                    )
+                }
+            }
+
+        if (!started) {
+            paSubscribed = false
+
+            if (
+                retryPaSubscriptionOnce(
+                    gatt,
+                    "no pudo iniciarse la escritura del CCCD"
+                )
+            ) {
+                return
+            }
+
+            setPaRejected(
+                "PA B19: UUID ...0004 + CCCD presentes, pero no pudo iniciarse la " +
+                    "habilitación de Notify tras 1 reintento"
+            )
+            proceedToHello()
+        }
+    }
+
 
     // ---------------------------------------------------------------------
     // Negociación y framing
@@ -770,6 +1403,33 @@ class BleManager(
             isConnected = true
             connectionState = "Conectado - B18 v2"
 
+            if (paSubscribed) {
+                bloodPressureState =
+                    BloodPressureUiState(
+                        status =
+                            BloodPressureStatus.SENSANDO,
+                        message =
+                            "PA disponible: UUID ...0004 + CCCD + Notify habilitados"
+                    )
+            } else if (
+                bloodPressureState.status !=
+                    BloodPressureStatus.RECHAZADA
+            ) {
+                setPaRejected(
+                    when {
+                        paCharacteristic == null ->
+                            "PA B19: UUID ...0004 no descubierta"
+
+                        paCharacteristic
+                            ?.getDescriptor(CCCD_UUID) == null ->
+                            "PA B19: UUID ...0004 descubierta, pero CCCD 0x2902 ausente"
+
+                        else ->
+                            "PA B19: UUID ...0004 + CCCD presentes, pero Notify no habilitado"
+                    }
+                )
+            }
+
             // Un epoch nuevo parte con STREAM=20. Sólo hay que restaurar una
             // preferencia diferente del valor por defecto.
             if (desiredStreamHz == 0) {
@@ -814,7 +1474,28 @@ class BleManager(
     // ---------------------------------------------------------------------
 
     private fun handleBpm(value: B18Bpm) {
-        lastBReceivedElapsed = SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
+        lastBReceivedElapsed = now
+
+        if (value.state == 1) {
+            if (paNoContactStartedElapsed == 0L) {
+                paNoContactStartedElapsed = now
+            }
+        } else {
+            paNoContactStartedElapsed = 0L
+
+            if (
+                bloodPressureState.message ==
+                    "Señal insuficiente"
+            ) {
+                bloodPressureState =
+                    bloodPressureState.copy(
+                        status =
+                            BloodPressureStatus.SENSANDO,
+                        message = null
+                    )
+            }
+        }
 
         bpm = if (value.visible && value.bpm != null) value.bpm else 0
         bpmVisible = value.visible && value.bpm != null
@@ -911,6 +1592,180 @@ class BleManager(
         }
     }
 
+
+    private fun consumePaNotification(
+        bytes: ByteArray
+    ) {
+        if (
+            !gattConnected ||
+            !paSubscribed ||
+            !negotiated
+        ) {
+            return
+        }
+
+        when (
+            val event =
+                bloodPressureAssembler
+                    .offer(bytes)
+        ) {
+            is BloodPressureTransportEvent.Began -> {
+                bloodPressureState =
+                    bloodPressureState.copy(
+                        status =
+                            BloodPressureStatus.TRANSFIRIENDO,
+                        windowSeq =
+                            event.windowSeq,
+                        progressSamples = 0,
+                        message = null
+                    )
+            }
+
+            is BloodPressureTransportEvent.Progress -> {
+                bloodPressureState =
+                    bloodPressureState.copy(
+                        status =
+                            BloodPressureStatus.TRANSFIRIENDO,
+                        windowSeq =
+                            event.windowSeq,
+                        progressSamples =
+                            event.receivedSamples,
+                        message =
+                            "${event.receivedSamples}/" +
+                                "${event.totalSamples} muestras"
+                    )
+            }
+
+            is BloodPressureTransportEvent.Rejected -> {
+                bloodPressureState =
+                    bloodPressureState.copy(
+                        status =
+                            BloodPressureStatus.RECHAZADA,
+                        message =
+                            event.reason
+                    )
+            }
+
+            is BloodPressureTransportEvent.Complete -> {
+                runBloodPressureInference(
+                    event.window.windowSeq,
+                    event.window.samples
+                )
+            }
+        }
+    }
+
+
+    private fun runBloodPressureInference(
+        windowSeq: Long,
+        rawIr: LongArray
+    ) {
+        if (bloodPressureInferenceRunning) {
+            bloodPressureState =
+                bloodPressureState.copy(
+                    status =
+                        BloodPressureStatus.RECHAZADA,
+                    windowSeq =
+                        windowSeq,
+                    message =
+                        "Inferencia PA ocupada"
+                )
+            return
+        }
+
+        bloodPressureInferenceRunning = true
+
+        val generation =
+            bloodPressureSessionGeneration
+
+        bloodPressureState =
+            bloodPressureState.copy(
+                status =
+                    BloodPressureStatus.CALCULANDO,
+                windowSeq =
+                    windowSeq,
+                progressSamples = 700,
+                message = null
+            )
+
+        bloodPressureScope.launch {
+            try {
+                val normalized =
+                    BloodPressurePreprocessor
+                        .preprocess(rawIr)
+                        .normalized
+
+                val model =
+                    synchronized(
+                        bloodPressureModelLock
+                    ) {
+                        bloodPressureModel
+                            ?: BloodPressureModel
+                                .fromAssets(
+                                    context.applicationContext,
+                                    numThreads = 2
+                                )
+                                .also {
+                                    bloodPressureModel = it
+                                }
+                    }
+
+                val estimate =
+                    model.predict(normalized)
+
+                mainHandler.post {
+                    bloodPressureInferenceRunning =
+                        false
+
+                    if (
+                        generation !=
+                            bloodPressureSessionGeneration
+                    ) {
+                        return@post
+                    }
+
+                    bloodPressureState =
+                        BloodPressureUiState(
+                            status =
+                                BloodPressureStatus.DISPONIBLE,
+                            systolicMmHg =
+                                estimate.systolicMmHg,
+                            diastolicMmHg =
+                                estimate.diastolicMmHg,
+                            windowSeq =
+                                windowSeq
+                        )
+                }
+            } catch (
+                error: Throwable
+            ) {
+                mainHandler.post {
+                    bloodPressureInferenceRunning =
+                        false
+
+                    if (
+                        generation !=
+                            bloodPressureSessionGeneration
+                    ) {
+                        return@post
+                    }
+
+                    bloodPressureState =
+                        bloodPressureState.copy(
+                            status =
+                                BloodPressureStatus.RECHAZADA,
+                            windowSeq =
+                                windowSeq,
+                            message =
+                                error.message
+                                    ?: "Ventana PA rechazada"
+                        )
+                }
+            }
+        }
+    }
+
+
     // ---------------------------------------------------------------------
     // Caducidad local
     // ---------------------------------------------------------------------
@@ -949,6 +1804,30 @@ class BleManager(
                     spo2 = null
                     spo2Valid = false
                     spo2Reason = 5
+                }
+            }
+
+            if (
+                paNoContactStartedElapsed != 0L &&
+                now - paNoContactStartedElapsed >=
+                    PA_PROLONGED_NO_CONTACT_MS
+            ) {
+                if (
+                    bloodPressureState.message !=
+                        "Señal insuficiente" ||
+                    bloodPressureState.systolicMmHg != null ||
+                    bloodPressureState.diastolicMmHg != null
+                ) {
+                    bloodPressureState =
+                        bloodPressureState.copy(
+                            status =
+                                BloodPressureStatus.RECHAZADA,
+                            systolicMmHg = null,
+                            diastolicMmHg = null,
+                            progressSamples = 0,
+                            message =
+                                "Señal insuficiente"
+                        )
                 }
             }
 
@@ -1114,11 +1993,20 @@ class BleManager(
         prv = null
         diagnostics = null
 
+        bloodPressureAssembler.reset()
+        bloodPressureSessionGeneration += 1L
+        bloodPressureState =
+            BloodPressureUiState(
+                status =
+                    BloodPressureStatus.SENSANDO
+            )
+
         lastBReceivedElapsed = 0L
         lastSReceivedElapsed = 0L
         spo2ReceivedElapsed = 0L
         spo2AgeAtReceive = null
         prvReceivedElapsed = 0L
+        paNoContactStartedElapsed = 0L
         lastPpgSequence = null
         lastPpgSampleTime = null
 
@@ -1142,8 +2030,11 @@ class BleManager(
 
         gattConnected = false
         mtuPending = false
+        paSubscribed = false
+        paSetupRetryUsed = false
         rxCharacteristic = null
         txCharacteristic = null
+        paCharacteristic = null
 
         clearLiveValues()
     }
