@@ -49,8 +49,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 import com.tallerbioing.ppgmonitor.data.AppDatabase
+import com.tallerbioing.ppgmonitor.data.BloodPressureMeasurementEntity
+import com.tallerbioing.ppgmonitor.data.DailyStatistics
 import com.tallerbioing.ppgmonitor.data.MeasurementEntity
 import com.tallerbioing.ppgmonitor.data.PatientNoteEntity
+import com.tallerbioing.ppgmonitor.data.PrvMeasurementEntity
+import com.tallerbioing.ppgmonitor.data.SpO2MeasurementEntity
 
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1396,44 +1400,50 @@ fun DailyRegisterScreen(
     val context =
         LocalContext.current
 
-
-    val measurementDao =
+    val database =
         remember {
-
             AppDatabase
                 .getDatabase(
                     context.applicationContext
                 )
-                .measurementDao()
         }
 
+    val measurementDao =
+        remember {
+            database.measurementDao()
+        }
+
+    val spo2Dao =
+        remember {
+            database.spO2MeasurementDao()
+        }
+
+    val bloodPressureDao =
+        remember {
+            database.bloodPressureMeasurementDao()
+        }
+
+    val prvDao =
+        remember {
+            database.prvMeasurementDao()
+        }
 
     val today =
         remember {
-
             LocalDate.now()
         }
 
-
     val formattedDate =
-        remember(
-            today
-        ) {
-
+        remember(today) {
             today.format(
-
                 DateTimeFormatter.ofPattern(
                     "dd/MM/yyyy"
                 )
             )
         }
 
-
     val startTimestamp =
-        remember(
-            today
-        ) {
-
+        remember(today) {
             today
                 .atStartOfDay(
                     ZoneId.systemDefault()
@@ -1442,16 +1452,10 @@ fun DailyRegisterScreen(
                 .toEpochMilli()
         }
 
-
     val endTimestamp =
-        remember(
+        remember(today) {
             today
-        ) {
-
-            today
-                .plusDays(
-                    1
-                )
+                .plusDays(1)
                 .atStartOfDay(
                     ZoneId.systemDefault()
                 )
@@ -1460,190 +1464,192 @@ fun DailyRegisterScreen(
                     1L
         }
 
-
     var measurements by
     remember {
-
         mutableStateOf(
             emptyList<MeasurementEntity>()
         )
     }
 
+    var spo2Measurements by
+    remember {
+        mutableStateOf(
+            emptyList<SpO2MeasurementEntity>()
+        )
+    }
+
+    var bloodPressureMeasurements by
+    remember {
+        mutableStateOf(
+            emptyList<BloodPressureMeasurementEntity>()
+        )
+    }
+
+    var prvMeasurements by
+    remember {
+        mutableStateOf(
+            emptyList<PrvMeasurementEntity>()
+        )
+    }
 
     var loading by
     remember {
-
-        mutableStateOf(
-            true
-        )
+        mutableStateOf(true)
     }
-
 
     var loadError by
     remember {
-
-        mutableStateOf<String?>(
-            null
-        )
+        mutableStateOf<String?>(null)
     }
-
 
     LaunchedEffect(
         startTimestamp,
         endTimestamp
     ) {
-
-        while (
-            true
-        ) {
-
+        while (true) {
             try {
-
                 measurements =
                     measurementDao
                         .getMeasurementsBetween(
-
                             startTimestamp =
                                 startTimestamp,
-
                             endTimestamp =
                                 endTimestamp
                         )
 
+                spo2Measurements =
+                    spo2Dao
+                        .getBetween(
+                            startTimestamp =
+                                startTimestamp,
+                            endTimestamp =
+                                endTimestamp
+                        )
 
-                loading =
-                    false
+                bloodPressureMeasurements =
+                    bloodPressureDao
+                        .getBetween(
+                            startTimestamp =
+                                startTimestamp,
+                            endTimestamp =
+                                endTimestamp
+                        )
 
+                prvMeasurements =
+                    prvDao
+                        .getBetween(
+                            startTimestamp =
+                                startTimestamp,
+                            endTimestamp =
+                                endTimestamp
+                        )
 
-                loadError =
-                    null
+                loading = false
+                loadError = null
 
             } catch (
                 exception: Exception
             ) {
-
-                loading =
-                    false
-
-
+                loading = false
                 loadError =
                     exception.message
                         ?: "Error al leer la base de datos"
             }
 
-
-            delay(
-                2000L
-            )
+            delay(2000L)
         }
     }
 
-
-    // ========================================================================
-    // FC
-    // ========================================================================
-
+    // Frecuencia cardíaca: conserva el criterio histórico de calidad >= 3.
     val reliableHeartMeasurements =
         measurements.filter {
-
-            it.bpm >
-                    0 &&
-                    it.signalQuality >=
+            it.bpm > 0 &&
+                it.signalQuality >=
                     MIN_SIGNAL_QUALITY_FOR_HR_STATS
         }
 
-
     val validBpms =
         reliableHeartMeasurements.map {
-
             it.bpm
         }
-
 
     val averageBpm =
         validBpms
             .takeIf {
-
                 it.isNotEmpty()
             }
             ?.average()
             ?.roundToInt()
 
-
     val minimumBpm =
-        validBpms
-            .minOrNull()
-
+        validBpms.minOrNull()
 
     val maximumBpm =
-        validBpms
-            .maxOrNull()
+        validBpms.maxOrNull()
 
+    // Actividad: usa timestamps y limita huecos largos para no transformar una
+    // desconexión en tiempo ficticio de reposo/movimiento.
+    val activityDurations =
+        DailyStatistics
+            .activityDurations(
+                measurements
+            )
 
-    // ========================================================================
-    // ACTIVIDAD
-    // ========================================================================
+    val averageSpo2 =
+        DailyStatistics
+            .averageOrNull(
+                spo2Measurements.map {
+                    it.spo2Percent
+                }
+            )
 
-    val validActivityMeasurements =
-        measurements.filter {
+    val averageSystolic =
+        DailyStatistics
+            .averageOrNull(
+                bloodPressureMeasurements.map {
+                    it.systolicMmHg
+                }
+            )
 
-            it.activityCode in
-                    0..2
-        }
+    val averageDiastolic =
+        DailyStatistics
+            .averageOrNull(
+                bloodPressureMeasurements.map {
+                    it.diastolicMmHg
+                }
+            )
 
+    val averagePp =
+        DailyStatistics
+            .averageOrNull(
+                prvMeasurements.map {
+                    it.ppMeanMs
+                }
+            )
 
-    val totalActivitySamples =
-        validActivityMeasurements
-            .size
+    val averageRmssd =
+        DailyStatistics
+            .averageOrNull(
+                prvMeasurements.map {
+                    it.rmssdMs
+                }
+            )
 
+    val averageSdnn =
+        DailyStatistics
+            .averageOrNull(
+                prvMeasurements.map {
+                    it.sdnnMs
+                }
+            )
 
-    val restCount =
-        validActivityMeasurements
-            .count {
-
-                it.activityCode ==
-                        0
-            }
-
-
-    val lightCount =
-        validActivityMeasurements
-            .count {
-
-                it.activityCode ==
-                        1
-            }
-
-
-    val moderateCount =
-        validActivityMeasurements
-            .count {
-
-                it.activityCode ==
-                        2
-            }
-
-
-    val restPercentage =
-        calculatePercentage(
-            restCount,
-            totalActivitySamples
-        )
-
-
-    val lightPercentage =
-        calculatePercentage(
-            lightCount,
-            totalActivitySamples
-        )
-
-
-    val moderatePercentage =
-        calculatePercentage(
-            moderateCount,
-            totalActivitySamples
-        )
-
+    val averagePnn50 =
+        DailyStatistics
+            .averageOrNull(
+                prvMeasurements.map {
+                    it.pnn50Percent
+                }
+            )
 
     Column(
         modifier =
@@ -1659,298 +1665,233 @@ fun DailyRegisterScreen(
     ) {
 
         RegisterBackHeader(
-            title =
-                "Registro diario",
-
-            onBack =
-                onBack
+            title = "Registro diario",
+            onBack = onBack
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    18.dp
-                )
+                Modifier.height(18.dp)
         )
-
 
         Text(
-            text =
-                formattedDate,
-
-            fontSize =
-                14.sp,
-
-            color =
-                TextSecondary
+            text = formattedDate,
+            fontSize = 14.sp,
+            color = TextSecondary
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    8.dp
-                )
+                Modifier.height(8.dp)
         )
-
 
         Surface(
             modifier =
                 Modifier.fillMaxWidth(),
-
             shape =
-                RoundedCornerShape(
-                    15.dp
-                ),
-
-            color =
-                White
+                RoundedCornerShape(15.dp),
+            color = White
         ) {
-
             Text(
                 text =
                     when {
-
                         loading ->
-
                             "Cargando registros..."
 
-
-                        loadError !=
-                                null ->
-
+                        loadError != null ->
                             "Error: $loadError"
 
-
                         else ->
-
-                            "Registros guardados hoy: ${measurements.size}"
+                            "Hoy: " +
+                                "${measurements.size} FC · " +
+                                "${spo2Measurements.size} SpO₂ · " +
+                                "${bloodPressureMeasurements.size} PA · " +
+                                "${prvMeasurements.size} PRV"
                     },
-
                 modifier =
-                    Modifier.padding(
-                        13.dp
-                    ),
-
-                fontSize =
-                    13.sp,
-
+                    Modifier.padding(13.dp),
+                fontSize = 13.sp,
                 fontWeight =
                     FontWeight.Medium,
-
-                color =
-                    TextSecondary
+                color = TextSecondary
             )
         }
 
-
         Spacer(
             modifier =
-                Modifier.height(
-                    15.dp
-                )
+                Modifier.height(15.dp)
         )
 
-
         DailyDataCard(
-
             title =
                 "Frecuencia cardíaca",
-
             mainValue =
                 averageBpm
                     ?.let {
-
-                        "$it BPM"
+                        "$it BPM promedio"
                     }
-                    ?: "-- BPM",
-
+                    ?: "-- BPM promedio",
             detail1 =
                 minimumBpm
                     ?.let {
-
                         "Mínima: $it BPM"
                     }
                     ?: "Mínima: -- BPM",
-
             detail2 =
                 maximumBpm
                     ?.let {
-
                         "Máxima: $it BPM"
                     }
                     ?: "Máxima: -- BPM",
-
-            background =
-                PinkSoft
+            background = PinkSoft
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    7.dp
-                )
+                Modifier.height(12.dp)
         )
 
+        DailyDataCard(
+            title = "Actividad",
+            mainValue =
+                "Tiempo registrado: " +
+                    DailyStatistics
+                        .formatDuration(
+                            activityDurations.totalMs
+                        ),
+            detail1 =
+                "Reposo: " +
+                    DailyStatistics
+                        .formatDuration(
+                            activityDurations.restMs
+                        ) +
+                    "   |   Leve: " +
+                    DailyStatistics
+                        .formatDuration(
+                            activityDurations.lightMs
+                        ),
+            detail2 =
+                "Moderado: " +
+                    DailyStatistics
+                        .formatDuration(
+                            activityDurations.moderateMs
+                        ),
+            background = BlueSoft
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(12.dp)
+        )
+
+        DailyDataCard(
+            title = "SpO₂",
+            mainValue =
+                averageSpo2
+                    ?.let {
+                        String.format(
+                            "%.1f %% promedio",
+                            it
+                        )
+                    }
+                    ?: "-- % promedio",
+            detail1 =
+                "${spo2Measurements.size} valores válidos",
+            detail2 =
+                "Registro exploratorio",
+            background = PurpleSoft
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(12.dp)
+        )
+
+        DailyDataCard(
+            title =
+                "Presión arterial",
+            mainValue =
+                if (
+                    averageSystolic != null &&
+                    averageDiastolic != null
+                ) {
+                    "${averageSystolic.roundToInt()}/" +
+                        "${averageDiastolic.roundToInt()} mmHg promedio"
+                } else {
+                    "--/-- mmHg promedio"
+                },
+            detail1 =
+                "${bloodPressureMeasurements.size} estimaciones válidas",
+            detail2 =
+                "Estimación PPG experimental",
+            background = YellowSoft
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(12.dp)
+        )
+
+        DailyDataCard(
+            title = "PRV",
+            mainValue =
+                if (
+                    averageRmssd != null &&
+                    averageSdnn != null
+                ) {
+                    "RMSSD " +
+                        String.format(
+                            "%.1f ms",
+                            averageRmssd
+                        ) +
+                        " · SDNN " +
+                        String.format(
+                            "%.1f ms",
+                            averageSdnn
+                        )
+                } else {
+                    "RMSSD -- ms · SDNN -- ms"
+                },
+            detail1 =
+                if (
+                    averagePnn50 != null &&
+                    averagePp != null
+                ) {
+                    "pNN50 " +
+                        String.format(
+                            "%.1f %%",
+                            averagePnn50
+                        ) +
+                        " · PP medio " +
+                        String.format(
+                            "%.1f ms",
+                            averagePp
+                        )
+                } else {
+                    "pNN50 -- % · PP medio -- ms"
+                },
+            detail2 =
+                "${prvMeasurements.size} ventanas PRV válidas",
+            background = GreenSoft
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(15.dp)
+        )
 
         Text(
             text =
-                "FC calculada con ${reliableHeartMeasurements.size} muestras de calidad buena o excelente.",
-
-            fontSize =
-                11.sp,
-
-            color =
-                TextSecondary,
-
-            modifier =
-                Modifier.padding(
-                    horizontal =
-                        8.dp
-                )
+                "Los promedios se calculan únicamente con registros válidos almacenados. " +
+                    "Los huecos prolongados de desconexión no se cuentan como tiempo de actividad. " +
+                    "SpO₂, presión arterial y PRV son variables exploratorias.",
+            fontSize = 11.sp,
+            color = TextSecondary
         )
-
 
         Spacer(
             modifier =
-                Modifier.height(
-                    12.dp
-                )
-        )
-
-
-        DailyDataCard(
-
-            title =
-                "Actividad",
-
-            mainValue =
-                if (
-                    totalActivitySamples >
-                    0
-                ) {
-
-                    "Datos del día"
-
-                } else {
-
-                    "Sin registros"
-                },
-
-            detail1 =
-                if (
-                    totalActivitySamples >
-                    0
-                ) {
-
-                    "Reposo: $restPercentage %   |   Leve: $lightPercentage %"
-
-                } else {
-
-                    "Reposo: -- %   |   Leve: -- %"
-                },
-
-            detail2 =
-                if (
-                    totalActivitySamples >
-                    0
-                ) {
-
-                    "Moderado: $moderatePercentage %"
-
-                } else {
-
-                    "Moderado: -- %"
-                },
-
-            background =
-                BlueSoft
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    12.dp
-                )
-        )
-
-
-        DailyDataCard(
-
-            title =
-                "Mediciones almacenadas",
-
-            mainValue =
-                measurements
-                    .size
-                    .toString(),
-
-            detail1 =
-                "Muestras guardadas hoy",
-
-            detail2 =
-                "Intervalo aproximado: 5 segundos",
-
-            background =
-                GreenSoft
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    12.dp
-                )
-        )
-
-
-        DailyDataCard(
-
-            title =
-                "SpO₂ exploratoria",
-
-            mainValue =
-                "-- %",
-
-            detail1 =
-                "Aún no almacenada en el registro",
-
-            detail2 =
-                "Dato exploratorio no diagnóstico",
-
-            background =
-                PurpleSoft
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    15.dp
-                )
-        )
-
-
-        Text(
-            text =
-                "Las mediciones originales permanecen almacenadas en Room. El filtro de calidad sólo se aplica al cálculo estadístico de frecuencia cardíaca.",
-
-            fontSize =
-                11.sp,
-
-            color =
-                TextSecondary
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    20.dp
-                )
+                Modifier.height(20.dp)
         )
     }
 }
