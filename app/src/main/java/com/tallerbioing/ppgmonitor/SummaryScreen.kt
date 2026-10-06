@@ -75,16 +75,8 @@ fun SummaryScreen(
         Spacer(modifier = Modifier.height(14.dp))
 
         HeartRateCard(
-            bpm = bleManager.bpm
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        B18StatusCard(
-            state = bleManager.bpmStateText,
-            ageMs = bleManager.bpmAgeMs,
-            quality = bleManager.signalQualityText,
-            connected = bleManager.isConnected
+            bpm = bleManager.bpm,
+            quality = bleManager.signalQualityText
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -110,64 +102,6 @@ fun SummaryScreen(
         )
 
         Spacer(modifier = Modifier.height(20.dp))
-    }
-}
-
-
-@Composable
-private fun B18StatusCard(
-    state: String,
-    ageMs: Long?,
-    quality: String,
-    connected: Boolean
-) {
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = White
-        ),
-        elevation = CardDefaults.cardElevation(
-            defaultElevation = 1.dp
-        )
-    ) {
-
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
-
-            Text(
-                text = "ESTADO DE LA MEDICIÓN",
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextSecondary
-            )
-
-            Spacer(modifier = Modifier.height(7.dp))
-
-            Text(
-                text = if (connected) state else "Sin conexión BLE",
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimary
-            )
-
-            Spacer(modifier = Modifier.height(5.dp))
-
-            Text(
-                text = "Calidad: $quality",
-                fontSize = 13.sp,
-                color = TextSecondary
-            )
-
-            Text(
-                text = "Edad BPM: " +
-                    (ageMs?.let { "${it} ms" } ?: "--"),
-                fontSize = 13.sp,
-                color = TextSecondary
-            )
-        }
     }
 }
 
@@ -512,7 +446,8 @@ fun DayChip(
 
 @Composable
 fun HeartRateCard(
-    bpm: Int
+    bpm: Int,
+    quality: String
 ) {
 
     // ------------------------------------------------------------------------
@@ -649,6 +584,18 @@ fun HeartRateCard(
                             TextSecondary
                     )
                 }
+
+                Spacer(
+                    modifier =
+                        Modifier.height(14.dp)
+                )
+
+                Text(
+                    text = "Calidad: $quality",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextSecondary
+                )
             }
 
 
@@ -716,13 +663,13 @@ fun ActivityCard(
         when (activityCode) {
 
             0 ->
-                "●"
+                "🧍‍♀️"
 
             1 ->
-                "🚶"
+                "🚶‍♀️"
 
             2 ->
-                "🏃"
+                "🏃‍♀️"
 
             else ->
                 "○"
