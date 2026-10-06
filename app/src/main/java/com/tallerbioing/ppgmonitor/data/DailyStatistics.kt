@@ -100,7 +100,16 @@ object DailyStatistics {
     fun formatDuration(
         durationMs: Long
     ): String {
-        if (durationMs <= 0L) return "0 min"
+        if (durationMs <= 0L) return "0 s"
+
+        if (durationMs < 60_000L) {
+            val seconds =
+                (durationMs / 1_000.0)
+                    .roundToLong()
+                    .coerceAtLeast(1L)
+
+            return "${seconds} s"
+        }
 
         val totalMinutes =
             (durationMs / 60_000.0)
