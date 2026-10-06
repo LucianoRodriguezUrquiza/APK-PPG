@@ -134,6 +134,24 @@ object CsvExporter {
         val zoneId =
             ZoneId.systemDefault()
 
+        return buildCsvFromData(
+            patient = patient,
+            measurements = measurements,
+            spo2Measurements = spo2Measurements,
+            bloodPressureMeasurements = bloodPressureMeasurements,
+            prvMeasurements = prvMeasurements,
+            zoneId = zoneId
+        )
+    }
+
+    internal fun buildCsvFromData(
+        patient: PatientProfile?,
+        measurements: List<MeasurementEntity>,
+        spo2Measurements: List<SpO2MeasurementEntity>,
+        bloodPressureMeasurements: List<BloodPressureMeasurementEntity>,
+        prvMeasurements: List<PrvMeasurementEntity>,
+        zoneId: ZoneId
+    ): String {
         val builder =
             StringBuilder()
 
