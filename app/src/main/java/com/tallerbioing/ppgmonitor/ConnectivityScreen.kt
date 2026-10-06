@@ -342,14 +342,6 @@ fun ConnectivityScreen(
         Spacer(
             modifier =
                 Modifier.height(
-                    14.dp
-                )
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(
                     18.dp
                 )
         )
