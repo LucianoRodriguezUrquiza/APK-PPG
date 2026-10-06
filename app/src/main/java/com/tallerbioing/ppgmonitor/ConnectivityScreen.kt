@@ -268,27 +268,6 @@ fun ConnectivityScreen(
                 Spacer(
                     modifier =
                         Modifier.height(
-                            5.dp
-                        )
-                )
-
-
-                // Estado interno útil para diagnóstico
-                Text(
-                    text =
-                        bleManager.connectionState,
-
-                    fontSize =
-                        12.sp,
-
-                    color =
-                        TextSecondary
-                )
-
-
-                Spacer(
-                    modifier =
-                        Modifier.height(
                             16.dp
                         )
                 )
@@ -368,148 +347,11 @@ fun ConnectivityScreen(
         )
 
 
-        // ====================================================================
-        // ÚLTIMO DATO
-        // ====================================================================
-
-        Surface(
-            modifier =
-                Modifier.fillMaxWidth(),
-
-            shape =
-                RoundedCornerShape(
-                    18.dp
-                ),
-
-            color =
-                White
-        ) {
-
-            Column(
-                modifier =
-                    Modifier.padding(
-                        16.dp
-                    )
-            ) {
-
-                Text(
-                    text =
-                        "Último dato recibido",
-
-                    fontWeight =
-                        FontWeight.Bold,
-
-                    color =
-                        TextPrimary
-                )
-
-
-                Spacer(
-                    modifier =
-                        Modifier.height(
-                            6.dp
-                        )
-                )
-
-
-                Text(
-                    text =
-                        bleManager.lastPacket,
-
-                    fontSize =
-                        13.sp,
-
-                    color =
-                        TextSecondary
-                )
-            }
-        }
-
-
         Spacer(
             modifier =
                 Modifier.height(
                     18.dp
                 )
-        )
-
-
-        // ====================================================================
-        // PROTOCOLO B18 / DIAGNÓSTICO TÉCNICO
-        // ====================================================================
-
-        Text(
-            text = "Protocolo B18",
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimary
-        )
-
-        Spacer(
-            modifier = Modifier.height(10.dp)
-        )
-
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(18.dp),
-            color = White
-        ) {
-
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
-
-                Text(
-                    text =
-                        if (bleManager.isConnected) {
-                            "BLE v2 negociado"
-                        } else {
-                            "Esperando negociación BLE v2"
-                        },
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Text(
-                    text = "MTU efectivo: ${bleManager.negotiatedMtu}",
-                    fontSize = 12.sp,
-                    color = TextSecondary
-                )
-
-                Text(
-                    text = "Boot: ${bleManager.bootId ?: "--"}",
-                    fontSize = 12.sp,
-                    color = TextSecondary
-                )
-
-                Text(
-                    text = "Epoch: ${bleManager.epoch?.toString() ?: "--"}",
-                    fontSize = 12.sp,
-                    color = TextSecondary
-                )
-
-                val d = bleManager.diagnostics
-
-                if (d != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Text(
-                        text =
-                            "RAM libre ${d.freeBytes} B · mínimo ${d.minFreeBytes} B\n" +
-                                "Stack mín. ${d.stackMinBytes} B · TX errores ${d.txErrors}\n" +
-                                "Stream omitido ${d.streamSkipped} · snapshots ${d.snapshotSkipped}\n" +
-                                "Comandos descartados ${d.commandDrops} · formato ${d.formatErrors}",
-                        fontSize = 11.sp,
-                        color = TextSecondary
-                    )
-                }
-            }
-        }
-
-        Spacer(
-            modifier = Modifier.height(28.dp)
         )
 
 
