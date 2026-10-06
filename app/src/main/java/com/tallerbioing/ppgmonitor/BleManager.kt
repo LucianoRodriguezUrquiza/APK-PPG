@@ -28,6 +28,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 
+import com.tallerbioing.ppgmonitor.bp.BloodPressureEstimate
 import com.tallerbioing.ppgmonitor.bp.BloodPressureModel
 import com.tallerbioing.ppgmonitor.bp.BloodPressurePreprocessor
 import com.tallerbioing.ppgmonitor.bp.BloodPressureStatus
@@ -193,6 +194,15 @@ class BleManager(
      */
     var onTelemetryReceived: ((B18Bpm, String, Long) -> Unit)? = null
 
+    var onSpo2Measurement:
+        ((B18Spo2, String) -> Unit)? = null
+
+    var onPrvMeasurement:
+        ((B18Prv, String) -> Unit)? = null
+
+    var onBloodPressureMeasurement:
+        ((BloodPressureEstimate, Long, String) -> Unit)? = null
+
     // ---------------------------------------------------------------------
     // Android / BLE
     // ---------------------------------------------------------------------
@@ -351,6 +361,9 @@ class BleManager(
         bluetoothGatt = null
         activeDevice = null
         onTelemetryReceived = null
+        onSpo2Measurement = null
+        onPrvMeasurement = null
+        onBloodPressureMeasurement = null
         bloodPressureScope.cancel()
         synchronized(bloodPressureModelLock) {
             bloodPressureModel?.close()
@@ -1570,25 +1583,47 @@ class BleManager(
 
         spo2Valid = validNow
         spo2 = if (validNow) value.value else null
+
+        val boot = bootId
+        if (validNow && boot != null) {
+            onSpo2Measurement
+                ?.invoke(
+                    value,
+                    boot
+                )
+        }
     }
 
     private fun handlePrv(value: B18Prv) {
         prvReceivedElapsed = SystemClock.elapsedRealtime()
-        prv = if (
-            value.valid &&
-            value.ageMs != null &&
-            value.ageMs < PRV_MAX_AGE_MS
-        ) {
-            value
-        } else {
-            value.copy(
-                valid = false,
-                ppMeanMs = null,
-                rmssdMs = null,
-                sdnnMs = null,
-                pnn50Percent = null,
-                flag = null
-            )
+
+        val accepted =
+            if (
+                value.valid &&
+                value.ageMs != null &&
+                value.ageMs < PRV_MAX_AGE_MS
+            ) {
+                value
+            } else {
+                value.copy(
+                    valid = false,
+                    ppMeanMs = null,
+                    rmssdMs = null,
+                    sdnnMs = null,
+                    pnn50Percent = null,
+                    flag = null
+                )
+            }
+
+        prv = accepted
+
+        val boot = bootId
+        if (accepted.valid && boot != null) {
+            onPrvMeasurement
+                ?.invoke(
+                    accepted,
+                    boot
+                )
         }
     }
 
@@ -1735,6 +1770,18 @@ class BleManager(
                             windowSeq =
                                 windowSeq
                         )
+
+                    val boot =
+                        bootId
+
+                    if (boot != null) {
+                        onBloodPressureMeasurement
+                            ?.invoke(
+                                estimate,
+                                windowSeq,
+                                boot
+                            )
+                    }
                 }
             } catch (
                 error: Throwable
