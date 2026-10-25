@@ -5,6 +5,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -57,19 +58,33 @@ fun SleepRecordCard() {
     val formatter = remember { DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss") }
     fun date(ms: Long) = Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).format(formatter)
 
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
+    Card(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = Color(0xFFFFE5CC),
+            contentColor = Color.Black
+        )
+    ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Registro de sueño", fontWeight = FontWeight.Bold)
-            Text("Período de descanso declarado manualmente; no detecta el sueño ni sus fases.")
-            Text(when {
-                periods == null -> "Cargando registro…"
-                active != null -> "Sueño declarado activo desde ${date(active.startMs)}"
-                else -> "Vigilia"
-            })
+            Text(
+                text = "Registro del sueño: " + when {
+                    periods == null -> "Cargando…"
+                    active != null -> "Sueño"
+                    else -> "Vigilia"
+                },
+                fontWeight = FontWeight.Bold,
+                color = Color.Black
+            )
             Button(
                 enabled = periods != null && !saving,
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = Purple),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFB85C14),
+                    contentColor = Color.White,
+                    disabledContainerColor = Color(0xFFB85C14).copy(alpha = 0.55f),
+                    disabledContentColor = Color.White
+                ),
                 onClick = {
                     // Capture the tap time before coroutine/database scheduling.
                     val now = System.currentTimeMillis()
@@ -91,13 +106,12 @@ fun SleepRecordCard() {
                     }
                 }
             ) { Text(if (active == null) "Me voy a dormir" else "Ya me desperté") }
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            error?.let { Text(it, color = Color.Black) }
             periods?.firstOrNull { it.endMs != null }?.let { last ->
                 val seconds = (last.durationMs() ?: 0) / 1000
                 Text("Último período: ${date(last.startMs)} → ${date(last.endMs!!)}")
                 Text("Duración: ${seconds / 3600} h ${(seconds % 3600) / 60} min ${seconds % 60} s")
             }
-            Text("La anotación se conserva sin BLE. Sólo se exportan las mediciones realmente guardadas.")
         }
     }
     Spacer(Modifier.height(18.dp))

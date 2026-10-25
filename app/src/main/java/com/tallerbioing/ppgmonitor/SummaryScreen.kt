@@ -571,7 +571,7 @@ fun HeartRateCard(
 
 
                     Text(
-                        text = "BPM",
+                        text = "LPM",
 
                         modifier =
                             Modifier.padding(

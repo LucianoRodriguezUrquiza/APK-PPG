@@ -831,7 +831,7 @@ fun PpgRealtimeCard(
 
                     Text(
                         text =
-                            "BPM",
+                            "LPM",
 
                         fontSize =
                             11.sp,
@@ -1731,21 +1731,21 @@ fun DailyRegisterScreen(
             mainValue =
                 averageBpm
                     ?.let {
-                        "$it BPM promedio"
+                        "$it LPM promedio"
                     }
-                    ?: "-- BPM promedio",
+                    ?: "-- LPM promedio",
             detail1 =
                 minimumBpm
                     ?.let {
-                        "Mínima: $it BPM"
+                        "Mínima: $it LPM"
                     }
-                    ?: "Mínima: -- BPM",
+                    ?: "Mínima: -- LPM",
             detail2 =
                 maximumBpm
                     ?.let {
-                        "Máxima: $it BPM"
+                        "Máxima: $it LPM"
                     }
-                    ?: "Máxima: -- BPM",
+                    ?: "Máxima: -- LPM",
             background = PinkSoft
         )
 
@@ -2169,9 +2169,9 @@ fun AverageRegisterScreen(
                 summary.averageBpm
                     ?.roundToInt()
                     ?.let {
-                        "$it BPM"
+                        "$it LPM"
                     }
-                    ?: "-- BPM",
+                    ?: "-- LPM",
             description =
                 "Promedio semanal · mín " +
                     (summary.minimumBpm
