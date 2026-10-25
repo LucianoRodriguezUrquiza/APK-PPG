@@ -1,6 +1,9 @@
 package com.tallerbioing.ppgmonitor
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,28 +21,86 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+private val ScreenPinkSelected = Color(0xFFB93670)
+private val ScreenPinkUnselected = Color(0xFFF7BED5)
+private val ScreenPinkLabel = Color(0xFF542B40)
+
+// Los botones reflejan el estado confirmado por el ACK BLE, no sólo el toque.
+@Composable
+private fun ScreenModeButton(
+    text: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val buttonColor by animateColorAsState(
+        targetValue = if (selected) ScreenPinkSelected else ScreenPinkUnselected,
+        label = "Color de selección del control de pantalla"
+    )
+    val labelColor by animateColorAsState(
+        targetValue = if (selected) Color.White else ScreenPinkLabel,
+        label = "Texto del control de pantalla"
+    )
+
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth().height(50.dp),
+        shape = RoundedCornerShape(20.dp),
+        elevation = ButtonDefaults.buttonElevation(
+            defaultElevation = if (selected) 4.dp else 0.dp,
+            pressedElevation = 1.dp
+        ),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = buttonColor,
+            contentColor = labelColor,
+            disabledContainerColor = buttonColor.copy(
+                alpha = if (selected) 0.72f else 0.60f
+            ),
+            disabledContentColor = labelColor.copy(alpha = 0.85f)
+        )
+    ) {
+        Text(
+            text = if (selected) "✓  $text" else text,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+        )
+    }
+}
+
 @Composable
 fun ScreenControlCard(ble: BleManager) {
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Ahorro de pantalla", fontWeight = FontWeight.Bold)
-            Text(ble.connectionState)
-            Text(ble.screenMessage)
-            Text("Apaga sólo la luz del reloj. El monitoreo continúa.")
-            val enabled = ble.isConnected && !ble.screenCommandPending
-            Button(onClick = { ble.requestScreen(false) }, enabled = enabled,
-                modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Purple)) {
-                Text("Apagar pantalla")
-            }
-            Button(onClick = { ble.requestScreen(true) }, enabled = enabled,
-                modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Purple)) {
-                Text("Encender pantalla")
-            }
-            if (ble.screenOn == null) {
-                TextButton(onClick = { ble.requestScreen(null) }, enabled = enabled) {
-                    Text("Consultar estado")
-                }
-            }
+    val enabled = ble.isConnected && !ble.screenCommandPending
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = PinkSoft,
+            contentColor = TextPrimary
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "Ahorro de batería",
+                fontWeight = FontWeight.Bold,
+                fontSize = 18.sp,
+                color = TextPrimary
+            )
+            ScreenModeButton(
+                text = "Apagar pantalla",
+                selected = ble.screenOn == false,
+                enabled = enabled,
+                onClick = { ble.requestScreen(false) }
+            )
+            ScreenModeButton(
+                text = "Encender pantalla",
+                selected = ble.screenOn == true,
+                enabled = enabled,
+                onClick = { ble.requestScreen(true) }
+            )
         }
     }
     Spacer(Modifier.height(18.dp))
@@ -62,7 +123,7 @@ fun SleepRecordCard() {
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(
-            containerColor = Color(0xFFFFE5CC),
+            containerColor = PinkSoft,
             contentColor = Color.Black
         )
     ) {
@@ -80,9 +141,9 @@ fun SleepRecordCard() {
                 enabled = periods != null && !saving,
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFB85C14),
+                    containerColor = ScreenPinkSelected,
                     contentColor = Color.White,
-                    disabledContainerColor = Color(0xFFB85C14).copy(alpha = 0.55f),
+                    disabledContainerColor = ScreenPinkSelected.copy(alpha = 0.55f),
                     disabledContentColor = Color.White
                 ),
                 onClick = {
@@ -109,7 +170,16 @@ fun SleepRecordCard() {
             error?.let { Text(it, color = Color.Black) }
             periods?.firstOrNull { it.endMs != null }?.let { last ->
                 val seconds = (last.durationMs() ?: 0) / 1000
-                Text("Último período: ${date(last.startMs)} → ${date(last.endMs!!)}")
+                Text("Último período:", fontWeight = FontWeight.SemiBold)
+                Text(date(last.startMs))
+                Text(
+                    "↓",
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                    color = ScreenPinkSelected,
+                    fontSize = 22.sp
+                )
+                Text(date(last.endMs!!))
                 Text("Duración: ${seconds / 3600} h ${(seconds % 3600) / 60} min ${seconds % 60} s")
             }
         }
