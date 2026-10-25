@@ -426,6 +426,8 @@ fun RegisterMenuScreen(
         )
 
 
+        SleepRecordCard()
+
         Text(
             text =
                 "Historial y organización de las mediciones",

@@ -708,6 +708,8 @@ fun PPGMonitorApp(
                             .deleteAllNotes()
 
 
+                        database.sleepPeriodDao().deleteAll()
+
                         PatientPreferences
                             .clear(
                                 context

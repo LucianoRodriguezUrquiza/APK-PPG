@@ -37,7 +37,7 @@ class AppDatabaseMigrationInstrumentedTest {
     }
 
     @Test
-    fun migration1To2PreservesOldMeasurementsAndCreatesExploratoryTables() {
+    fun migration1To3PreservesOldMeasurementsAndCreatesSleepTable() {
         val path =
             context.getDatabasePath(TEST_DB)
 
@@ -92,7 +92,7 @@ class AppDatabaseMigrationInstrumentedTest {
                 TEST_DB
             )
                 .addMigrations(
-                    AppDatabase.MIGRATION_1_2
+                    AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3
                 )
                 .build()
 

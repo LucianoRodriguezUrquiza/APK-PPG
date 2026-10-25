@@ -31,12 +31,15 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PatientNoteEntity::class,
         SpO2MeasurementEntity::class,
         BloodPressureMeasurementEntity::class,
-        PrvMeasurementEntity::class
+        PrvMeasurementEntity::class,
+        SleepPeriod::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
+    abstract fun sleepPeriodDao(): SleepPeriodDao
+
 
 
     // ========================================================================
@@ -65,6 +68,12 @@ abstract class AppDatabase : RoomDatabase() {
 
 
     companion object {
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS sleep_periods (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER)")
+            }
+        }
+
 
         internal val MIGRATION_1_2 =
             object : Migration(1, 2) {
@@ -143,7 +152,7 @@ abstract class AppDatabase : RoomDatabase() {
                             "ppg_monitor_database"
                         )
                             .addMigrations(
-                                MIGRATION_1_2
+                                MIGRATION_1_2, MIGRATION_2_3
                             )
                             .build()
 

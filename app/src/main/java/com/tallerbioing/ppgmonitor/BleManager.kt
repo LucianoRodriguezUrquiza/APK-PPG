@@ -109,6 +109,34 @@ class BleManager(
     var isConnected by mutableStateOf(false)
         private set
 
+    var screenOn by mutableStateOf<Boolean?>(null)
+        private set
+    var screenCommandPending by mutableStateOf(false)
+        private set
+    var screenMessage by mutableStateOf("Estado sin confirmar")
+        private set
+    private var screenNeedsQuery = false
+
+    fun requestScreen(on: Boolean?) {
+        if (!isConnected || pendingLogicalCommand != null) {
+            screenMessage = "Conectá el dispositivo y esperá la orden pendiente"
+            return
+        }
+        screenCommandPending = true
+        screenMessage = "Esperando confirmación del dispositivo…"
+        enqueueLogicalCommand(when (on) {
+            true -> "SCREEN:ON"
+            false -> "SCREEN:OFF"
+            null -> "SCREEN:GET"
+        }, null)
+    }
+
+    private fun screenFailed(message: String) {
+        screenCommandPending = false
+        screenOn = null
+        screenMessage = message
+    }
+
     var lastPacket by mutableStateOf("Sin datos")
         private set
 
@@ -1398,6 +1426,20 @@ class BleManager(
     private fun handleLine(line: String) {
         lastPacket = line
 
+        // SCREEN uses the existing LF-framed NUS response channel.
+        // Only accept a response for the current screen command/session.
+        if (negotiated && (line == "ACK:SCREEN:ON" || line == "ACK:SCREEN:OFF")) {
+            val pending = pendingLogicalCommand
+            if (pending?.command?.startsWith("SCREEN:") == true &&
+                (pending.command == "SCREEN:GET" || line == "ACK:${pending.command}")) {
+                screenOn = line == "ACK:SCREEN:ON"
+                screenCommandPending = false
+                screenMessage = if (screenOn == true) "Pantalla encendida" else "Pantalla apagada"
+                pendingLogicalCommand = null
+                mainHandler.removeCallbacks(commandTimeoutRunnable)
+            }
+            return
+        }
         val frame = BleProtocol.parse(line) ?: return
 
         if (!negotiated) {
@@ -1414,6 +1456,7 @@ class BleManager(
             bootId = hello.boot
             epoch = hello.epoch
             isConnected = true
+            screenNeedsQuery = true
             connectionState = "Conectado - B18 v2"
 
             if (paSubscribed) {
@@ -1821,6 +1864,10 @@ class BleManager(
         override fun run() {
             if (!negotiated || !gattConnected) return
 
+            if (screenNeedsQuery && pendingLogicalCommand == null) {
+                screenNeedsQuery = false
+                requestScreen(null)
+            }
             val now = SystemClock.elapsedRealtime()
 
             if (lastBReceivedElapsed != 0L &&
@@ -1932,6 +1979,7 @@ class BleManager(
     }
 
     private fun handleError(fullError: String) {
+        if (screenCommandPending) screenFailed("Sin confirmación: $fullError")
         if (pendingLogicalCommand != null) {
             pendingLogicalCommand = null
             mainHandler.removeCallbacks(commandTimeoutRunnable)
@@ -1953,6 +2001,8 @@ class BleManager(
             pumpWriteQueue()
             armCommandTimeout()
         } else {
+            if (pending.command.startsWith("SCREEN:"))
+                screenFailed("Sin confirmación. Consultá el estado o reintentá.")
             lastPacket = "Timeout de comando: ${pending.command}"
             pendingLogicalCommand = null
         }
@@ -2016,6 +2066,8 @@ class BleManager(
     }
 
     private fun clearLiveValues() {
+        screenNeedsQuery = false
+        screenFailed("Desconectado: estado sin confirmar")
         isConnected = false
         negotiated = false
         subscribed = false

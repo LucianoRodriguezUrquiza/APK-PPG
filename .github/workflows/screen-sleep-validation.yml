@@ -1,0 +1,53 @@
+name: Screen and sleep validation
+
+on:
+  push:
+    branches:
+      - screen-control-sleep-v1
+    paths:
+      - "app/**"
+      - ".github/workflows/screen-sleep-validation.yml"
+
+jobs:
+  android-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Run JVM tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Compile app
+        run: ./gradlew assembleDebug assembleDebugAndroidTest --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PPG-Monitor-screen-sleep-debug
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Verify Room migration and sleep persistence on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          disable-animations: true
+          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.tallerbioing.ppgmonitor.data.SleepPersistenceTest,com.tallerbioing.ppgmonitor.data.AppDatabaseMigrationInstrumentedTest --stacktrace

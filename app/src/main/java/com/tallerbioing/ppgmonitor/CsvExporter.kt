@@ -2,6 +2,8 @@ package com.tallerbioing.ppgmonitor
 
 import android.content.Context
 import android.net.Uri
+import androidx.room.withTransaction
+import com.tallerbioing.ppgmonitor.data.SleepPeriod
 
 import com.tallerbioing.ppgmonitor.data.AppDatabase
 import com.tallerbioing.ppgmonitor.data.BloodPressureMeasurementEntity
@@ -87,7 +89,12 @@ object CsvExporter {
             "n_pa_validas",
             "n_prv_validas",
             "periodo_inicio",
-            "periodo_fin"
+            "periodo_fin",
+            "Estado_sueno",
+            "sueno_periodo_id",
+            "sueno_inicio_ms",
+            "sueno_fin_ms",
+            "sueno_duracion_ms"
         )
 
     private data class DetailedRow(
@@ -106,6 +113,7 @@ object CsvExporter {
                 applicationContext
             )
 
+        return database.withTransaction {
         val measurements =
             database
                 .measurementDao()
@@ -134,14 +142,16 @@ object CsvExporter {
         val zoneId =
             ZoneId.systemDefault()
 
-        return buildCsvFromData(
+        buildCsvFromData(
             patient = patient,
             measurements = measurements,
             spo2Measurements = spo2Measurements,
             bloodPressureMeasurements = bloodPressureMeasurements,
             prvMeasurements = prvMeasurements,
-            zoneId = zoneId
+            zoneId = zoneId,
+            sleepPeriods = database.sleepPeriodDao().getAll()
         )
+        }
     }
 
     internal fun buildCsvFromData(
@@ -150,7 +160,8 @@ object CsvExporter {
         spo2Measurements: List<SpO2MeasurementEntity>,
         bloodPressureMeasurements: List<BloodPressureMeasurementEntity>,
         prvMeasurements: List<PrvMeasurementEntity>,
-        zoneId: ZoneId
+        zoneId: ZoneId,
+        sleepPeriods: List<SleepPeriod> = emptyList()
     ): String {
         val builder =
             StringBuilder()
@@ -243,8 +254,14 @@ object CsvExporter {
         detailedRows.forEach {
             appendRow(
                 builder,
-                it.values
+                it.values + sleepFields(sleepPeriods.firstOrNull { period -> period.contains(it.timestamp) })
             )
+        }
+
+        // Keep declared intervals even when no measurements were received.
+        sleepPeriods.sortedBy { it.startMs }.forEach { period ->
+            appendRow(builder, timestampFields(period.startMs, zoneId) + sleepFields(period) +
+                mapOf("tipo_registro" to "PERIODO_SUENO_DECLARADO"))
         }
 
         // -----------------------------------------------------------------
@@ -440,6 +457,14 @@ object CsvExporter {
                 it.write(csvContent)
             }
     }
+
+    private fun sleepFields(period: SleepPeriod?): Map<String, String> = mapOf(
+        "Estado_sueno" to if (period == null) "VIGILIA" else "SUENO",
+        "sueno_periodo_id" to (period?.id?.toString() ?: ""),
+        "sueno_inicio_ms" to (period?.startMs?.toString() ?: ""),
+        "sueno_fin_ms" to (period?.endMs?.toString() ?: ""),
+        "sueno_duracion_ms" to (period?.durationMs()?.toString() ?: "")
+    )
 
     private fun measurementRow(
         measurement: MeasurementEntity,
